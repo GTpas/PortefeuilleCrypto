@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   db:
     image: timescale/timescaledb:latest-pg16
@@ -9,16 +7,29 @@ services:
       POSTGRES_PASSWORD: crypto_password
       POSTGRES_DB: crypto_market_data
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - timescaledb_data:/var/lib/postgresql/data
       - ./db/migrations:/docker-entrypoint-initdb.d
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U crypto_user -d crypto_market_data"]
-      interval: 5s
-      timeout: 5s
+      interval: 10s
+      timeout: 10s
       retries: 5
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    container_name: crypto_redis
+    ports:
+      - "127.0.0.1:6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
 volumes:
   timescaledb_data:

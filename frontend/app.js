@@ -1,268 +1,305 @@
+/* ============================================
+   ANTIGRAVITY COCKPIT — Frontend Logic
+   ============================================ */
+
 const API_URL = `http://${window.location.host}/api`;
 const WS_URL = `ws://${window.location.host}/ws/live`;
 
-let chart;
-let candlestickSeries;
-let volumeSeries;
-let ws;
+let chart, candlestickSeries, volumeSeries, ws;
 let currentSymbol = '';
-let lastCandleTime = 0;
 
-// Initialize Chart
+// ── Chart ──────────────────────────────────
+
 function initChart() {
-    const chartContainer = document.getElementById('tvchart');
-    
-    chart = LightweightCharts.createChart(chartContainer, {
-        layout: {
-            background: { type: 'solid', color: 'transparent' },
-            textColor: '#8B94A5',
-            fontFamily: 'Inter',
-        },
-        grid: {
-            vertLines: { color: 'rgba(255, 255, 255, 0.03)' },
-            horzLines: { color: 'rgba(255, 255, 255, 0.03)' },
-        },
-        crosshair: {
-            mode: LightweightCharts.CrosshairMode.Normal,
-        },
-        rightPriceScale: {
-            borderColor: 'rgba(255, 255, 255, 0.1)',
-        },
-        timeScale: {
-            borderColor: 'rgba(255, 255, 255, 0.1)',
-            timeVisible: true,
-            secondsVisible: true,
-        },
+    const el = document.getElementById('tvchart');
+    chart = LightweightCharts.createChart(el, {
+        layout: { background: { type: 'solid', color: 'transparent' }, textColor: '#8B94A5', fontFamily: 'Inter' },
+        grid: { vertLines: { color: 'rgba(255,255,255,0.03)' }, horzLines: { color: 'rgba(255,255,255,0.03)' } },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        rightPriceScale: { borderColor: 'rgba(255,255,255,0.1)' },
+        timeScale: { borderColor: 'rgba(255,255,255,0.1)', timeVisible: true, secondsVisible: true },
     });
 
     candlestickSeries = chart.addCandlestickSeries({
-        upColor: '#26A69A',
-        downColor: '#EF5350',
-        borderVisible: false,
-        wickUpColor: '#26A69A',
-        wickDownColor: '#EF5350',
+        upColor: '#26A69A', downColor: '#EF5350', borderVisible: false,
+        wickUpColor: '#26A69A', wickDownColor: '#EF5350',
     });
-
     volumeSeries = chart.addHistogramSeries({
-        color: '#26a69a',
-        priceFormat: { type: 'volume' },
-        priceScaleId: '', 
-        scaleMargins: {
-            top: 0.8,
-            bottom: 0,
-        },
+        color: '#26a69a', priceFormat: { type: 'volume' }, priceScaleId: '',
+        scaleMargins: { top: 0.8, bottom: 0 },
     });
 
-    // Handle resize
     new ResizeObserver(entries => {
-        if (entries.length === 0 || entries[0].target !== chartContainer) { return; }
-        const newRect = entries[0].contentRect;
-        chart.applyOptions({ height: newRect.height, width: newRect.width });
-    }).observe(chartContainer);
+        if (!entries.length || entries[0].target !== el) return;
+        const r = entries[0].contentRect;
+        chart.applyOptions({ height: r.height, width: r.width });
+    }).observe(el);
 }
 
-// Fetch Symbols and Populate Dropdown
+// ── Symbols ────────────────────────────────
+
 async function loadSymbols() {
     try {
-        const response = await fetch(`${API_URL}/symbols`);
-        const data = await response.json();
-        
-        const select = document.getElementById('symbol-select');
-        select.innerHTML = '';
-        
-        data.symbols.forEach(sym => {
-            const option = document.createElement('option');
-            option.value = sym;
-            option.textContent = sym;
-            select.appendChild(option);
+        const res = await fetch(`${API_URL}/symbols`);
+        const data = await res.json();
+        const sel = document.getElementById('symbol-select');
+        sel.innerHTML = '';
+        data.symbols.forEach(s => {
+            const o = document.createElement('option');
+            o.value = s; o.textContent = s;
+            sel.appendChild(o);
         });
-
         if (data.symbols.length > 0) {
-            select.value = data.symbols[0];
+            sel.value = data.symbols[0];
             switchSymbol(data.symbols[0]);
         }
-
-        select.addEventListener('change', (e) => switchSymbol(e.target.value));
-    } catch (err) {
-        console.error('Error loading symbols:', err);
-    }
+        sel.addEventListener('change', e => switchSymbol(e.target.value));
+    } catch (e) { console.error('Symbol load error:', e); }
 }
 
-// Switch Symbol Logic
+// ── Switch Symbol ──────────────────────────
+
 async function switchSymbol(symbol) {
-    if (ws) {
-        ws.close();
-    }
+    if (ws) ws.close();
     currentSymbol = symbol;
     document.getElementById('current-symbol').textContent = symbol;
-    
-    // Clear existing data
     candlestickSeries.setData([]);
     volumeSeries.setData([]);
-    
-    // Load historical
+
+    // Highlight active watchlist item
+    document.querySelectorAll('.watchlist-item').forEach(el => {
+        el.classList.toggle('active', el.dataset.symbol === symbol);
+    });
+
     await loadHistorical(symbol);
-    
-    // Connect Live WS
     connectWebSocket(symbol);
 }
 
-// Load Historical Data
+// ── Historical Data ────────────────────────
+
 async function loadHistorical(symbol) {
     try {
-        const response = await fetch(`${API_URL}/historical/${encodeURIComponent(symbol)}`);
-        const data = await response.json();
-        
-        if (data && data.length > 0) {
-            try {
-                // Filter duplicates by time (Lightweight charts requires strictly ascending time)
-                const uniqueData = [];
-                const seenTimes = new Set();
-                data.forEach(d => {
-                    if (!seenTimes.has(d.time)) {
-                        seenTimes.add(d.time);
-                        uniqueData.push(d);
-                    }
-                });
-                uniqueData.sort((a, b) => a.time - b.time);
+        const res = await fetch(`${API_URL}/historical/${encodeURIComponent(symbol)}`);
+        const data = await res.json();
+        if (!data || !data.length) return;
 
-                candlestickSeries.setData(uniqueData.map(d => ({
-                    time: d.time,
-                    open: d.open,
-                    high: d.high,
-                    low: d.low,
-                    close: d.close
-                })));
-                
-                volumeSeries.setData(uniqueData.map(d => ({
-                    time: d.time,
-                    value: d.value || 0,
-                    color: d.close >= d.open ? 'rgba(38, 166, 154, 0.5)' : 'rgba(239, 83, 80, 0.5)'
-                })));
-            } catch(e) {
-                console.error("Historical SetData Error:", e);
-            }
-            
-            updateCurrentPrice(data[data.length - 1].close, data[data.length - 1].close >= data[data.length - 1].open);
-            lastCandleTime = data[data.length - 1].time;
-        }
-    } catch (err) {
-        console.error('Error loading historical data:', err);
-    }
+        const seen = new Set(), unique = [];
+        data.forEach(d => { if (!seen.has(d.time)) { seen.add(d.time); unique.push(d); } });
+        unique.sort((a, b) => a.time - b.time);
+
+        try {
+            candlestickSeries.setData(unique.map(d => ({ time: d.time, open: d.open, high: d.high, low: d.low, close: d.close })));
+            volumeSeries.setData(unique.map(d => ({ time: d.time, value: d.value || 0, color: d.close >= d.open ? 'rgba(38,166,154,0.5)' : 'rgba(239,83,80,0.5)' })));
+        } catch (e) { console.error('SetData error:', e); }
+
+        const last = data[data.length - 1];
+        updateCurrentPrice(last.close, last.close >= last.open);
+    } catch (e) { console.error('Historical error:', e); }
 }
 
-// Connect WebSocket for Real-Time Updates
+// ── WebSocket ──────────────────────────────
+
 function connectWebSocket(symbol) {
-    const statusBadge = document.getElementById('ws-status');
-    statusBadge.textContent = 'Connecting...';
-    statusBadge.className = 'status-badge';
-    
+    const badge = document.getElementById('ws-status');
+    badge.textContent = 'Connecting…'; badge.className = 'status-badge';
+
     ws = new WebSocket(`${WS_URL}/${encodeURIComponent(symbol)}`);
-    
-    ws.onopen = () => {
-        statusBadge.textContent = 'Live';
-        statusBadge.className = 'status-badge connected';
-    };
-    
+
+    ws.onopen = () => { badge.textContent = 'Live'; badge.className = 'status-badge connected'; };
+
     ws.onmessage = (event) => {
         try {
-            const message = JSON.parse(event.data);
-            if (message.type === 'candle') {
-                const d = message.data;
-                if (!d || d.time == null || d.open == null || d.close == null) return;
-                
-                try {
-                    candlestickSeries.update({
-                        time: d.time,
-                        open: d.open,
-                        high: d.high,
-                        low: d.low,
-                        close: d.close
-                    });
-                    
-                    volumeSeries.update({
-                        time: d.time,
-                        value: d.value || 0,
-                        color: d.close >= d.open ? 'rgba(38, 166, 154, 0.5)' : 'rgba(239, 83, 80, 0.5)'
-                    });
-                } catch(err) {
-                    console.error("Chart Update Error:", err, d);
-                }
-                
-                updateCurrentPrice(d.close, d.close >= d.open);
-            }
-        } catch(e) {
-            console.error("WS Message Error:", e, event.data);
-        }
+            const msg = JSON.parse(event.data);
+            if (msg.type !== 'candle') return;
+            const d = msg.data;
+            if (!d || d.time == null || d.open == null || d.close == null) return;
+            try {
+                candlestickSeries.update({ time: d.time, open: d.open, high: d.high, low: d.low, close: d.close });
+                volumeSeries.update({ time: d.time, value: d.value || 0, color: d.close >= d.open ? 'rgba(38,166,154,0.5)' : 'rgba(239,83,80,0.5)' });
+            } catch (e) { /* chart update error, ignore silently */ }
+            updateCurrentPrice(d.close, d.close >= d.open);
+        } catch (e) { console.error('WS parse error:', e); }
     };
-    
+
     ws.onclose = () => {
-        statusBadge.textContent = 'Disconnected';
-        statusBadge.className = 'status-badge disconnected';
-        // Auto reconnect after 3 seconds if not intentionally closed
-        setTimeout(() => {
-            if (currentSymbol === symbol) {
-                connectWebSocket(symbol);
-            }
-        }, 3000);
+        badge.textContent = 'Offline'; badge.className = 'status-badge disconnected';
+        setTimeout(() => { if (currentSymbol === symbol) connectWebSocket(symbol); }, 3000);
     };
 }
 
 function updateCurrentPrice(price, isUp) {
-    const priceEl = document.getElementById('current-price');
-    priceEl.textContent = Number(price).toFixed(2);
-    priceEl.className = 'current-price ' + (isUp ? 'price-up' : 'price-down');
+    const el = document.getElementById('current-price');
+    el.textContent = Number(price).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    el.className = 'current-price ' + (isUp ? 'price-up' : 'price-down');
 }
 
-// Error Logging System
+// ── Portfolio ──────────────────────────────
+
+async function updatePortfolio() {
+    try {
+        const res = await fetch(`${API_URL}/portfolio`);
+        const d = await res.json();
+        if (!d || d.error) return;
+
+        document.getElementById('port-total').textContent = '$' + Number(d.total_value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        document.getElementById('port-cash').textContent = '$' + Number(d.current_cash).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+        const pnl = d.total_value - d.initial_capital;
+        const pnlEl = document.getElementById('port-pnl');
+        pnlEl.textContent = (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toFixed(2);
+        pnlEl.className = 'value ' + (pnl >= 0 ? 'up' : 'down');
+
+        const exposure = d.initial_capital > 0 ? ((d.initial_capital - d.current_cash) / d.initial_capital * 100) : 0;
+        document.getElementById('port-exposure').textContent = exposure.toFixed(1) + '%';
+        document.getElementById('port-positions').textContent = d.positions.length + ' / 8';
+
+        const drawdown = d.initial_capital > 0 ? Math.min(0, (d.total_value - d.initial_capital) / d.initial_capital * 100) : 0;
+        const ddEl = document.getElementById('port-drawdown');
+        ddEl.textContent = drawdown.toFixed(1) + '%';
+        ddEl.className = 'value ' + (drawdown < -2 ? 'down' : '');
+    } catch (e) { /* silent */ }
+}
+
+// ── Watchlist ──────────────────────────────
+
+async function updateWatchlist() {
+    try {
+        const res = await fetch(`${API_URL}/watchlist`);
+        const data = await res.json();
+        if (!data || data.error) return;
+
+        const container = document.getElementById('watchlist-container');
+        container.innerHTML = '';
+
+        data.forEach(item => {
+            const div = document.createElement('div');
+            div.className = 'watchlist-item' + (item.symbol === currentSymbol ? ' active' : '');
+            div.dataset.symbol = item.symbol;
+
+            const scoreClass = item.s_total >= 0.5 ? 'bullish' : item.s_total <= -0.2 ? 'bearish' : 'neutral';
+            div.innerHTML = `
+                <div>
+                    <div class="wl-symbol">${item.symbol}</div>
+                </div>
+                <div class="wl-details">
+                    <div class="wl-price">${item.price ? Number(item.price).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '--'}</div>
+                    <span class="wl-score ${scoreClass}">${item.s_total >= 0 ? '+' : ''}${item.s_total.toFixed(2)}</span>
+                </div>
+            `;
+            div.addEventListener('click', () => {
+                document.getElementById('symbol-select').value = item.symbol;
+                switchSymbol(item.symbol);
+            });
+            container.appendChild(div);
+        });
+    } catch (e) { /* silent */ }
+}
+
+// ── Signals Panel ──────────────────────────
+
+async function updateSignals() {
+    try {
+        const res = await fetch(`${API_URL}/signals`);
+        const data = await res.json();
+        if (!data || data.error) return;
+
+        const container = document.getElementById('signals-container');
+        container.innerHTML = '';
+
+        data.forEach(sig => {
+            const card = document.createElement('div');
+            card.className = 'signal-card';
+            card.innerHTML = `
+                <div class="signal-symbol">${sig.symbol}</div>
+                <div class="signal-scores">
+                    <span class="score-badge social">SOC ${sig.s_social >= 0 ? '+' : ''}${sig.s_social.toFixed(2)}</span>
+                    <span class="score-badge market">MKT ${sig.s_market >= 0 ? '+' : ''}${sig.s_market.toFixed(2)}</span>
+                    <span class="score-badge risk">RSK ${sig.s_risk.toFixed(2)}</span>
+                    <span class="score-badge total">Σ ${sig.s_total >= 0 ? '+' : ''}${sig.s_total.toFixed(2)}</span>
+                </div>
+            `;
+            container.appendChild(card);
+        });
+    } catch (e) { /* silent */ }
+}
+
+// ── Activity Feed ──────────────────────────
+
+async function updateActivity() {
+    try {
+        const res = await fetch(`${API_URL}/trades/recent`);
+        const data = await res.json();
+        if (!data || data.error) return;
+
+        const container = document.getElementById('activity-container');
+        container.innerHTML = '';
+
+        data.forEach(trade => {
+            const div = document.createElement('div');
+            div.className = 'feed-item';
+            const time = new Date(trade.executed_at).toLocaleTimeString();
+            const actionClass = trade.side === 'buy' ? 'buy' : 'sell';
+            div.innerHTML = `
+                <span class="feed-time">${time}</span>
+                <span class="feed-action ${actionClass}">${trade.side}</span>
+                <span class="feed-detail">${trade.symbol} — ${Number(trade.qty).toFixed(6)} @ $${Number(trade.price).toLocaleString('en-US', {minimumFractionDigits: 2})}</span>
+                <span class="feed-score">slip: ${Number(trade.slippage_bps).toFixed(1)}bps | ${trade.reason || ''}</span>
+            `;
+            container.appendChild(div);
+        });
+
+        if (!data.length) {
+            container.innerHTML = '<div class="feed-item"><span class="feed-detail" style="color:var(--text-muted)">No trades yet — bot is evaluating market conditions…</span></div>';
+        }
+    } catch (e) { /* silent */ }
+}
+
+// ── Logging System ─────────────────────────
+
 function setupLogging() {
     const logsContainer = document.getElementById('logs-container');
     const logsModal = document.getElementById('logs-modal');
     const logsBtn = document.getElementById('logs-btn');
     const closeBtn = document.getElementById('close-logs');
-    
+
     function addLog(message, type = 'info') {
         const entry = document.createElement('div');
         entry.className = `log-entry ${type}`;
         const time = new Date().toLocaleTimeString();
         entry.innerHTML = `<span class="log-time">[${time}]</span> ${message}`;
         logsContainer.prepend(entry);
+        // Keep max 200 entries
+        while (logsContainer.children.length > 200) logsContainer.removeChild(logsContainer.lastChild);
     }
 
-    // Intercept console.error
-    const originalError = console.error;
-    console.error = function(...args) {
+    const origError = console.error;
+    console.error = function (...args) {
         addLog(args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' '), 'error');
-        originalError.apply(console, args);
+        origError.apply(console, args);
     };
 
-    // Intercept window errors
-    window.onerror = function(msg, url, lineNo, columnNo, error) {
-        addLog(`${msg} (at ${url}:${lineNo}:${columnNo})`, 'error');
-        return false;
-    };
+    window.onerror = (msg, url, line, col) => { addLog(`${msg} (${url}:${line}:${col})`, 'error'); return false; };
 
-    // Modal toggles
     logsBtn.addEventListener('click', () => logsModal.classList.remove('hidden'));
     closeBtn.addEventListener('click', () => logsModal.classList.add('hidden'));
+    logsModal.addEventListener('click', (e) => { if (e.target === logsModal) logsModal.classList.add('hidden'); });
 }
 
-// Initialization
+// ── Init ───────────────────────────────────
+
 document.addEventListener('DOMContentLoaded', () => {
     setupLogging();
     initChart();
     loadSymbols();
+
+    // Periodic updates
+    updatePortfolio();
+    updateWatchlist();
+    updateSignals();
+    updateActivity();
+
+    setInterval(updatePortfolio, 5000);
+    setInterval(updateWatchlist, 10000);
+    setInterval(updateSignals, 10000);
+    setInterval(updateActivity, 8000);
 });
-async function updatePortfolio() {
-    try {
-        const res = await fetch(API_URL + '/portfolio');
-        const data = await res.json();
-        if (data && !data.error) {
-            document.getElementById('port-total').textContent = '$' + data.total_value.toFixed(2);
-            document.getElementById('port-cash').textContent = '$' + data.current_cash.toFixed(2);
-            document.getElementById('port-positions').textContent = data.positions.length + ' / 8';
-        }
-    } catch(e) {}
-}
-setInterval(updatePortfolio, 5000);
-updatePortfolio();

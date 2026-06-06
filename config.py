@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     ENABLE_COINGECKO: bool = Field(default=False, description="Whether to run CoinGecko enrichment worker")
     ENABLE_DEX: bool = Field(default=False, description="Whether to enable DEX (Uniswap) ingestion")
 
+    # Redis
+    REDIS_URL: str = Field(default="redis://localhost:6379/0", description="Redis connection URL for queue/cache")
+
     # Logging
     LOG_LEVEL: str = Field(default="INFO")
 
