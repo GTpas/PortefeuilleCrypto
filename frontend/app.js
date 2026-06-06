@@ -114,19 +114,34 @@ async function loadHistorical(symbol) {
         const data = await response.json();
         
         if (data && data.length > 0) {
-            candlestickSeries.setData(data.map(d => ({
-                time: d.time,
-                open: d.open,
-                high: d.high,
-                low: d.low,
-                close: d.close
-            })));
-            
-            volumeSeries.setData(data.map(d => ({
-                time: d.time,
-                value: d.value,
-                color: d.close >= d.open ? 'rgba(38, 166, 154, 0.5)' : 'rgba(239, 83, 80, 0.5)'
-            })));
+            try {
+                // Filter duplicates by time (Lightweight charts requires strictly ascending time)
+                const uniqueData = [];
+                const seenTimes = new Set();
+                data.forEach(d => {
+                    if (!seenTimes.has(d.time)) {
+                        seenTimes.add(d.time);
+                        uniqueData.push(d);
+                    }
+                });
+                uniqueData.sort((a, b) => a.time - b.time);
+
+                candlestickSeries.setData(uniqueData.map(d => ({
+                    time: d.time,
+                    open: d.open,
+                    high: d.high,
+                    low: d.low,
+                    close: d.close
+                })));
+                
+                volumeSeries.setData(uniqueData.map(d => ({
+                    time: d.time,
+                    value: d.value || 0,
+                    color: d.close >= d.open ? 'rgba(38, 166, 154, 0.5)' : 'rgba(239, 83, 80, 0.5)'
+                })));
+            } catch(e) {
+                console.error("Historical SetData Error:", e);
+            }
             
             updateCurrentPrice(data[data.length - 1].close, data[data.length - 1].close >= data[data.length - 1].open);
             lastCandleTime = data[data.length - 1].time;
@@ -150,27 +165,34 @@ function connectWebSocket(symbol) {
     };
     
     ws.onmessage = (event) => {
-        const message = JSON.parse(event.data);
-        if (message.type === 'candle') {
-            const d = message.data;
-            
-            // Avoid duplicate exact same timestamps if updating the last candle
-            // Lightweight charts handles update automatically if time matches the last time
-            candlestickSeries.update({
-                time: d.time,
-                open: d.open,
-                high: d.high,
-                low: d.low,
-                close: d.close
-            });
-            
-            volumeSeries.update({
-                time: d.time,
-                value: d.value,
-                color: d.close >= d.open ? 'rgba(38, 166, 154, 0.5)' : 'rgba(239, 83, 80, 0.5)'
-            });
-            
-            updateCurrentPrice(d.close, d.close >= d.open);
+        try {
+            const message = JSON.parse(event.data);
+            if (message.type === 'candle') {
+                const d = message.data;
+                if (!d || d.time == null || d.open == null || d.close == null) return;
+                
+                try {
+                    candlestickSeries.update({
+                        time: d.time,
+                        open: d.open,
+                        high: d.high,
+                        low: d.low,
+                        close: d.close
+                    });
+                    
+                    volumeSeries.update({
+                        time: d.time,
+                        value: d.value || 0,
+                        color: d.close >= d.open ? 'rgba(38, 166, 154, 0.5)' : 'rgba(239, 83, 80, 0.5)'
+                    });
+                } catch(err) {
+                    console.error("Chart Update Error:", err, d);
+                }
+                
+                updateCurrentPrice(d.close, d.close >= d.open);
+            }
+        } catch(e) {
+            console.error("WS Message Error:", e, event.data);
         }
     };
     
@@ -192,8 +214,55 @@ function updateCurrentPrice(price, isUp) {
     priceEl.className = 'current-price ' + (isUp ? 'price-up' : 'price-down');
 }
 
+// Error Logging System
+function setupLogging() {
+    const logsContainer = document.getElementById('logs-container');
+    const logsModal = document.getElementById('logs-modal');
+    const logsBtn = document.getElementById('logs-btn');
+    const closeBtn = document.getElementById('close-logs');
+    
+    function addLog(message, type = 'info') {
+        const entry = document.createElement('div');
+        entry.className = `log-entry ${type}`;
+        const time = new Date().toLocaleTimeString();
+        entry.innerHTML = `<span class="log-time">[${time}]</span> ${message}`;
+        logsContainer.prepend(entry);
+    }
+
+    // Intercept console.error
+    const originalError = console.error;
+    console.error = function(...args) {
+        addLog(args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' '), 'error');
+        originalError.apply(console, args);
+    };
+
+    // Intercept window errors
+    window.onerror = function(msg, url, lineNo, columnNo, error) {
+        addLog(`${msg} (at ${url}:${lineNo}:${columnNo})`, 'error');
+        return false;
+    };
+
+    // Modal toggles
+    logsBtn.addEventListener('click', () => logsModal.classList.remove('hidden'));
+    closeBtn.addEventListener('click', () => logsModal.classList.add('hidden'));
+}
+
 // Initialization
 document.addEventListener('DOMContentLoaded', () => {
+    setupLogging();
     initChart();
     loadSymbols();
 });
+async function updatePortfolio() {
+    try {
+        const res = await fetch(API_URL + '/portfolio');
+        const data = await res.json();
+        if (data && !data.error) {
+            document.getElementById('port-total').textContent = '$' + data.total_value.toFixed(2);
+            document.getElementById('port-cash').textContent = '$' + data.current_cash.toFixed(2);
+            document.getElementById('port-positions').textContent = data.positions.length + ' / 8';
+        }
+    } catch(e) {}
+}
+setInterval(updatePortfolio, 5000);
+updatePortfolio();

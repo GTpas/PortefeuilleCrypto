@@ -11,14 +11,17 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import settings
+from paper_execution.engine import PaperExecutionEngine
 
 # Global DB pool
 pool = None
+execution_engine = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global pool
+    global pool, execution_engine
     pool = await asyncpg.create_pool(settings.DATABASE_URL)
+    execution_engine = PaperExecutionEngine(pool)
     yield
     await pool.close()
 
@@ -35,6 +38,16 @@ app.add_middleware(
 @app.get("/api/symbols")
 async def get_symbols():
     return {"symbols": settings.ACTIVE_SYMBOLS}
+
+@app.get("/api/portfolio")
+async def get_portfolio():
+    if execution_engine:
+        try:
+            state = await execution_engine.get_portfolio_state()
+            return state
+        except Exception as e:
+            return {"error": str(e)}
+    return {"error": "Engine not initialized"}
 
 @app.get("/api/historical/{symbol:path}")
 async def get_historical(symbol: str, limit: int = 1800):

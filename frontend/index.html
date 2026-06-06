@@ -7,7 +7,7 @@
     <!-- Google Fonts: Inter -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
     <!-- TradingView Lightweight Charts -->
-    <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+    <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js" crossorigin="anonymous"></script>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -19,6 +19,7 @@
                 <h1>Crypto Live <span>Terminal</span></h1>
             </div>
             <div class="controls">
+                <button id="logs-btn" class="log-btn">View Logs</button>
                 <label for="symbol-select">Market:</label>
                 <select id="symbol-select">
                     <!-- Options populated via JS -->
@@ -28,6 +29,35 @@
                 </div>
             </div>
         </header>
+
+        <!-- Logs Modal -->
+        <div id="logs-modal" class="modal hidden">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>Application Logs & Errors</h2>
+                    <button id="close-logs" class="close-btn">&times;</button>
+                </div>
+                <div class="modal-body" id="logs-container">
+                    <!-- Logs will appear here -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Portfolio Dashboard -->
+        <section class="portfolio-bar">
+            <div class="portfolio-item">
+                <span class="label">Total Value</span>
+                <span class="value" id="port-total">$10,000.00</span>
+            </div>
+            <div class="portfolio-item">
+                <span class="label">Cash Balance</span>
+                <span class="value" id="port-cash">$10,000.00</span>
+            </div>
+            <div class="portfolio-item">
+                <span class="label">Positions</span>
+                <span class="value" id="port-positions">0 / 8</span>
+            </div>
+        </section>
 
         <!-- Main Chart Area -->
         <main class="main-content">
