@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crypto Live Terminal</title>
+    <!-- Google Fonts: Inter -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <!-- TradingView Lightweight Charts -->
+    <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar / Header -->
+        <header class="header">
+            <div class="logo">
+                <div class="dot pulse"></div>
+                <h1>Crypto Live <span>Terminal</span></h1>
+            </div>
+            <div class="controls">
+                <label for="symbol-select">Market:</label>
+                <select id="symbol-select">
+                    <!-- Options populated via JS -->
+                </select>
+                <div class="status-indicator">
+                    <span id="ws-status" class="status-badge disconnected">Disconnected</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Chart Area -->
+        <main class="main-content">
+            <div class="chart-wrapper">
+                <div class="chart-header">
+                    <h2 id="current-symbol">Select a symbol</h2>
+                    <div class="current-price" id="current-price">--</div>
+                </div>
+                <div id="tvchart" class="chart-container"></div>
+            </div>
+        </main>
+    </div>
+    
+    <script src="app.js"></script>
+</body>
+</html>
