@@ -237,6 +237,10 @@ async function updateActivity() {
         data.forEach(trade => {
             const div = document.createElement('div');
             div.className = 'feed-item';
+            if (trade.decision_snapshot_id) {
+                div.style.cursor = 'pointer';
+                div.addEventListener('click', () => openDrilldown(trade.decision_snapshot_id, trade.symbol));
+            }
             const time = new Date(trade.executed_at).toLocaleTimeString();
             const actionClass = trade.side === 'buy' ? 'buy' : 'sell';
             div.innerHTML = `
@@ -254,35 +258,166 @@ async function updateActivity() {
     } catch (e) { /* silent */ }
 }
 
+// ── Modals & Drilldown ─────────────────────
+
+let waterfallChartInstance = null;
+
+async function openDrilldown(decisionId, symbol) {
+    const modal = document.getElementById('drilldown-modal');
+    document.getElementById('drilldown-title').textContent = `Decision Drill-down: ${symbol} (#${decisionId})`;
+    
+    // Fetch factors
+    try {
+        const res = await fetch(`${API_URL}/factors/${decisionId}`);
+        const factors = await res.json();
+        
+        const container = document.getElementById('factors-container');
+        container.innerHTML = '';
+        
+        const labels = ['Base S_total (0)'];
+        const data = [0];
+        const backgroundColors = ['#8B94A5'];
+        
+        let cumulative = 0;
+        
+        factors.forEach(f => {
+            // UI List
+            const div = document.createElement('div');
+            div.className = 'factor-item';
+            const isPos = f.contribution >= 0;
+            div.innerHTML = `
+                <div class="factor-header">
+                    <span class="factor-name">[${f.category.toUpperCase()}] ${f.name}</span>
+                    <span class="factor-contrib ${isPos ? 'positive' : 'negative'}">${isPos ? '+' : ''}${f.contribution.toFixed(4)}</span>
+                </div>
+                <div class="factor-exp">Val: ${f.value.toFixed(2)} — ${f.explanation}</div>
+            `;
+            container.appendChild(div);
+            
+            // Chart Data
+            labels.push(f.name);
+            data.push(f.contribution);
+            backgroundColors.push(isPos ? 'rgba(38, 166, 154, 0.8)' : 'rgba(239, 83, 80, 0.8)');
+            cumulative += f.contribution;
+        });
+        
+        // Final sum bar
+        labels.push('Final S_total');
+        data.push(cumulative);
+        backgroundColors.push('#00E5FF');
+        
+        // Render Chart.js Waterfall
+        const ctx = document.getElementById('waterfallChart').getContext('2d');
+        if (waterfallChartInstance) waterfallChartInstance.destroy();
+        
+        waterfallChartInstance = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Score Contribution',
+                    data: data,
+                    backgroundColor: backgroundColors,
+                    borderWidth: 0
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: {
+                    legend: { display: false },
+                    title: { display: true, text: 'Factor Contributions to S_total', color: '#8B94A5' }
+                },
+                scales: {
+                    y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#8B94A5' } },
+                    x: { grid: { display: false }, ticks: { color: '#8B94A5', maxRotation: 45, minRotation: 45 } }
+                }
+            }
+        });
+        
+        modal.classList.remove('hidden');
+    } catch (e) {
+        console.error("Drilldown error:", e);
+    }
+}
+
+document.getElementById('close-drilldown').addEventListener('click', () => {
+    document.getElementById('drilldown-modal').classList.add('hidden');
+});
+
+// Docs Modal
+document.getElementById('docs-btn').addEventListener('click', async () => {
+    try {
+        const res = await fetch(`${API_URL}/docs/signals-sentiments`);
+        const data = await res.json();
+        document.getElementById('docs-container').innerHTML = marked.parse(data.content);
+        document.getElementById('docs-modal').classList.remove('hidden');
+    } catch(e) { console.error("Docs load error:", e); }
+});
+
+document.getElementById('close-docs').addEventListener('click', () => {
+    document.getElementById('docs-modal').classList.add('hidden');
+});
+
 // ── Logging System ─────────────────────────
 
+let systemLogsInterval = null;
+
+async function updateSystemLogs() {
+    try {
+        const res = await fetch(`${API_URL}/system/logs?limit=50`);
+        const logs = await res.json();
+        const logsContainer = document.getElementById('logs-container');
+        
+        // Save scroll pos if we want, or just rebuild (for simplicity we rebuild)
+        logsContainer.innerHTML = '';
+        
+        logs.forEach(log => {
+            const entry = document.createElement('div');
+            entry.className = `sys-log-entry ${log.level}`;
+            
+            const time = new Date(log.ts_event).toLocaleTimeString();
+            
+            let imgHtml = '';
+            if (log.metadata && log.metadata.screenshot_path) {
+                // If the backend drops screenshots in frontend/screenshots/, 
+                // they are served at /screenshots/
+                imgHtml = `<img src="${log.metadata.screenshot_path}" class="sys-log-screenshot" alt="Screenshot" onclick="window.open(this.src, '_blank')">`;
+            }
+
+            entry.innerHTML = `
+                <div class="sys-log-header">
+                    <span class="sys-log-component">[${log.component}]</span>
+                    <span class="sys-log-time">${time}</span>
+                </div>
+                <div class="sys-log-message">${log.message}</div>
+                ${imgHtml}
+            `;
+            logsContainer.appendChild(entry);
+        });
+    } catch (e) {
+        console.error("Failed to fetch system logs:", e);
+    }
+}
+
 function setupLogging() {
-    const logsContainer = document.getElementById('logs-container');
     const logsModal = document.getElementById('logs-modal');
     const logsBtn = document.getElementById('logs-btn');
     const closeBtn = document.getElementById('close-logs');
 
-    function addLog(message, type = 'info') {
-        const entry = document.createElement('div');
-        entry.className = `log-entry ${type}`;
-        const time = new Date().toLocaleTimeString();
-        entry.innerHTML = `<span class="log-time">[${time}]</span> ${message}`;
-        logsContainer.prepend(entry);
-        // Keep max 200 entries
-        while (logsContainer.children.length > 200) logsContainer.removeChild(logsContainer.lastChild);
-    }
-
-    const origError = console.error;
-    console.error = function (...args) {
-        addLog(args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' '), 'error');
-        origError.apply(console, args);
-    };
-
-    window.onerror = (msg, url, line, col) => { addLog(`${msg} (${url}:${line}:${col})`, 'error'); return false; };
-
-    logsBtn.addEventListener('click', () => logsModal.classList.remove('hidden'));
+    logsBtn.addEventListener('click', () => {
+        logsModal.classList.remove('hidden');
+        updateSystemLogs(); // fetch immediately on open
+    });
+    
     closeBtn.addEventListener('click', () => logsModal.classList.add('hidden'));
     logsModal.addEventListener('click', (e) => { if (e.target === logsModal) logsModal.classList.add('hidden'); });
+    
+    // Poll logs every 5s if modal is open (optional), or just poll generally
+    setInterval(() => {
+        if (!logsModal.classList.contains('hidden')) {
+            updateSystemLogs();
+        }
+    }, 5000);
 }
 
 // ── Init ───────────────────────────────────

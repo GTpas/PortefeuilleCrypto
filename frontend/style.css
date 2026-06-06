@@ -409,3 +409,156 @@ select:hover, select:focus { border-color: var(--accent-color); }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ============================================
+   DRILL-DOWN & DOCS MODAL STYLES
+   ============================================ */
+
+.drilldown-content {
+    max-width: 900px;
+    height: 80vh;
+}
+
+.drilldown-grid {
+    display: grid;
+    grid-template-columns: 350px 1fr;
+    gap: 1.5rem;
+    height: 100%;
+}
+
+.drilldown-factors {
+    border-right: 1px solid var(--border-color);
+    padding-right: 1.5rem;
+    overflow-y: auto;
+}
+
+.drilldown-factors h3 {
+    font-size: 0.9rem;
+    margin-bottom: 1rem;
+    color: var(--text-secondary);
+}
+
+.factor-item {
+    display: flex;
+    flex-direction: column;
+    padding: 0.5rem;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    margin-bottom: 0.75rem;
+    background: var(--bg-card-hover);
+}
+
+.factor-header {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 0.25rem;
+}
+
+.factor-name {
+    font-weight: 600;
+    font-size: 0.8rem;
+}
+
+.factor-contrib {
+    font-weight: 700;
+    font-size: 0.8rem;
+}
+.factor-contrib.positive { color: var(--up-color); }
+.factor-contrib.negative { color: var(--down-color); }
+
+.factor-exp {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+}
+
+.drilldown-chart-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.markdown-body {
+    padding: 1.5rem;
+    font-size: 0.9rem;
+    line-height: 1.6;
+    color: var(--text-primary);
+}
+
+.markdown-body h1, .markdown-body h2 {
+    margin-bottom: 1rem;
+    margin-top: 1.5rem;
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 0.3rem;
+}
+.markdown-body h1 { margin-top: 0; }
+.markdown-body p { margin-bottom: 1rem; }
+.markdown-body ul { margin-left: 1.5rem; margin-bottom: 1rem; }
+.markdown-body code {
+    background: var(--bg-card-hover);
+    padding: 0.2rem 0.4rem;
+    border-radius: 3px;
+    font-family: monospace;
+}
+
+/* ============================================
+   SYSTEM LOGS MODAL
+   ============================================ */
+
+.logs-content {
+    max-width: 800px;
+    height: 80vh;
+}
+
+#logs-container {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.85rem;
+}
+
+.sys-log-entry {
+    background: var(--bg-card-hover);
+    border-left: 3px solid var(--border-color);
+    padding: 0.75rem;
+    border-radius: 0 4px 4px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.sys-log-entry.INFO { border-left-color: #2196F3; }
+.sys-log-entry.WARN { border-left-color: #FF9800; }
+.sys-log-entry.ERROR { border-left-color: #F44336; }
+.sys-log-entry.SUCCESS { border-left-color: #4CAF50; }
+
+.sys-log-header {
+    display: flex;
+    justify-content: space-between;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+}
+
+.sys-log-component {
+    font-weight: bold;
+    color: var(--text-primary);
+}
+
+.sys-log-message {
+    color: var(--text-primary);
+    line-height: 1.4;
+}
+
+.sys-log-screenshot {
+    margin-top: 0.5rem;
+    max-width: 100%;
+    max-height: 200px;
+    border-radius: 4px;
+    border: 1px solid var(--border-color);
+    cursor: pointer;
+    transition: transform 0.2s;
+}
+
+.sys-log-screenshot:hover {
+    transform: scale(1.02);
+}

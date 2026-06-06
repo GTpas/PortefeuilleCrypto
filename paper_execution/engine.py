@@ -44,7 +44,8 @@ class PaperExecutionEngine:
 
     async def execute_trade(self, symbol: str, exchange_code: str, side: str, 
                           qty: float, price: float, spread_bps: float, 
-                          depth_1pct_usd: float, signal_score: float, reason: str) -> bool:
+                          depth_1pct_usd: float, signal_score: float, reason: str,
+                          snapshot_id: Optional[int] = None) -> bool:
         """
         Executes a simulated trade applying Antigravity risk rules and dynamic slippage.
         Returns True if executed, False if rejected by risk engine.
@@ -107,9 +108,10 @@ class PaperExecutionEngine:
 
                 # Execute order
                 await conn.execute("""
-                    INSERT INTO paper_trade (portfolio_id, symbol, exchange_code, side, qty, price, slippage_bps, fees, signal_score, reason)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                """, portfolio_id, symbol, exchange_code, side, float(qty), float(exec_price), float(slippage_bps), float(fees), float(signal_score), reason)
+                    INSERT INTO paper_trade (portfolio_id, symbol, exchange_code, side, qty, price, slippage_bps, fees, signal_score, reason, decision_snapshot_id)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                """, portfolio_id, symbol, exchange_code, side, float(qty), float(exec_price), float(slippage_bps), float(fees), float(signal_score), reason, snapshot_id)
+
                 
                 # Update Cash
                 new_cash = current_cash - total_cost if side == 'buy' else current_cash + total_cost

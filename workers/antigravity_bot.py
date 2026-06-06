@@ -94,7 +94,8 @@ async def run_bot():
                         spread_bps=mkt_data['spread_bps'],
                         depth_1pct_usd=mkt_data['depth_1pct_usd'],
                         signal_score=s_total,
-                        reason="S_total >= BUY_THRESHOLD"
+                        reason="S_total >= BUY_THRESHOLD",
+                        snapshot_id=score['snapshot_id']
                     )
                 
                 elif s_total < SELL_THRESHOLD and pos:
@@ -108,7 +109,8 @@ async def run_bot():
                         spread_bps=mkt_data['spread_bps'],
                         depth_1pct_usd=mkt_data['depth_1pct_usd'],
                         signal_score=s_total,
-                        reason="S_total < SELL_THRESHOLD"
+                        reason="S_total < SELL_THRESHOLD",
+                        snapshot_id=score['snapshot_id']
                     )
             
             # Wait before next cycle

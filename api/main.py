@@ -65,7 +65,7 @@ async def get_watchlist():
                 # Latest signal score
                 sig = await conn.fetchrow("""
                     SELECT s_social, s_market, s_risk, s_total
-                    FROM signal_log
+                    FROM decision_snapshot
                     WHERE symbol = $1
                     ORDER BY ts_eval DESC
                     LIMIT 1
@@ -105,7 +105,7 @@ async def get_signals():
             for symbol in settings.ACTIVE_SYMBOLS:
                 sig = await conn.fetchrow("""
                     SELECT s_social, s_market, s_risk, s_total, ts_eval
-                    FROM signal_log
+                    FROM decision_snapshot
                     WHERE symbol = $1
                     ORDER BY ts_eval DESC
                     LIMIT 1
@@ -124,6 +124,110 @@ async def get_signals():
     except Exception as e:
         return {"error": str(e)}
 
+# ── Detailed Explanations ───────────────────
+
+@app.get("/api/signals/{symbol:path}")
+async def get_signal_history(symbol: str, limit: int = 50):
+    """Returns the history of decisions for a specific symbol."""
+    try:
+        async with pool.acquire() as conn:
+            records = await conn.fetch("""
+                SELECT id, ts_eval, s_social, s_market, s_risk, s_total, action_proposed, confidence_score
+                FROM decision_snapshot
+                WHERE symbol = $1
+                ORDER BY ts_eval DESC
+                LIMIT $2
+            """, symbol, limit)
+            
+            return [
+                {
+                    "id": r['id'],
+                    "ts_eval": r['ts_eval'].isoformat(),
+                    "s_social": float(r['s_social']),
+                    "s_market": float(r['s_market']),
+                    "s_risk": float(r['s_risk']),
+                    "s_total": float(r['s_total']),
+                    "action_proposed": r['action_proposed'],
+                    "confidence_score": float(r['confidence_score']) if r['confidence_score'] else None
+                }
+                for r in records
+            ]
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/factors/{decision_id}")
+async def get_decision_factors(decision_id: int):
+    """Returns the contributing factors for a specific decision."""
+    try:
+        async with pool.acquire() as conn:
+            records = await conn.fetch("""
+                SELECT factor_category, factor_name, factor_value, score_contribution, explanation
+                FROM decision_factor
+                WHERE decision_snapshot_id = $1
+                ORDER BY abs(score_contribution) DESC
+            """, decision_id)
+            
+            return [
+                {
+                    "category": r['factor_category'],
+                    "name": r['factor_name'],
+                    "value": float(r['factor_value']),
+                    "contribution": float(r['score_contribution']),
+                    "explanation": r['explanation']
+                }
+                for r in records
+            ]
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/system/logs")
+async def get_system_logs(limit: int = 100):
+    """Returns the backend ingestion and tracking logs."""
+    try:
+        async with pool.acquire() as conn:
+            records = await conn.fetch("""
+                SELECT id, ts_event, component, level, message, metadata
+                FROM system_log
+                ORDER BY ts_event DESC
+                LIMIT $1
+            """, limit)
+            
+            return [
+                {
+                    "id": r['id'],
+                    "ts_event": r['ts_event'].isoformat(),
+                    "component": r['component'],
+                    "level": r['level'],
+                    "message": r['message'],
+                    "metadata": json.loads(r['metadata']) if isinstance(r['metadata'], str) else r['metadata']
+                }
+                for r in records
+            ]
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/docs/signals-sentiments")
+async def get_signals_docs():
+    """Serves the in-app documentation for Signals & Sentiments."""
+    doc_markdown = """
+# Signals & Sentiments Documentation
+
+The **Signals & Sentiments** engine evaluates assets based on three core dimensions: **Social (SOC)**, **Market (MKT)**, and **Risk (RSK)**.
+
+## How Scores are Calculated
+
+- **SOC (Social)**: Measures the narrative strength. It includes Mention Velocity (how fast people are talking), Bot Risk Penalty (discounting fake engagement), and Sentiment Polarity.
+- **MKT (Market)**: Measures market confirmation. It looks at 15m/1h momentum, relative volume, and order book pressure.
+- **RSK (Risk)**: Measures execution safety. A low RSK score means high spread, low depth, or high volatility.
+- **Σ (S_total)**: The composite score used for decision making.
+  - Formula: `S_total = 0.45 * SOC + 0.45 * MKT + 0.10 * (2 * RSK - 1)`
+
+## Understanding Decisions
+
+A high `S_total` (e.g., > 0.65) does not guarantee a buy if risk gates are triggered. The engine logs every contributing factor, allowing full traceability of why a trade was executed, rejected, or exited.
+"""
+    return {"content": doc_markdown}
+
 # ── Recent Trades ───────────────────────────
 
 @app.get("/api/trades/recent")
@@ -132,7 +236,7 @@ async def get_recent_trades(limit: int = 50):
     try:
         async with pool.acquire() as conn:
             records = await conn.fetch("""
-                SELECT symbol, exchange_code, side, qty, price, slippage_bps, fees, signal_score, reason, executed_at
+                SELECT symbol, exchange_code, side, qty, price, slippage_bps, fees, signal_score, reason, executed_at, decision_snapshot_id
                 FROM paper_trade
                 ORDER BY executed_at DESC
                 LIMIT $1
@@ -150,6 +254,7 @@ async def get_recent_trades(limit: int = 50):
                     "signal_score": float(r['signal_score']) if r['signal_score'] else None,
                     "reason": r['reason'],
                     "executed_at": r['executed_at'].isoformat(),
+                    "decision_snapshot_id": r['decision_snapshot_id']
                 }
                 for r in records
             ]
