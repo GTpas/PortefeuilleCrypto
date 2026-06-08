@@ -124,6 +124,51 @@ select:hover, select:focus { border-color: var(--accent-color); }
 .wl-quality.unavailable { background: var(--text-muted); opacity: 0.5; }
 
 /* ============================================
+   OPS / TERMINALS PANEL
+   ============================================ */
+.ops-content { width: min(1100px, 95vw); height: min(800px, 92vh); }
+.ops-header-right { display: flex; align-items: center; gap: 0.75rem; }
+.ops-body { display: flex; flex-direction: column; gap: 0.75rem; overflow: hidden; height: 100%; }
+.ops-processes {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 0.6rem; overflow-y: auto; max-height: 40%;
+}
+.ops-proc {
+    background: var(--bg-card, #11151f); border: 1px solid rgba(255,255,255,0.07);
+    border-left: 3px solid var(--text-muted); border-radius: 8px; padding: 0.6rem;
+}
+.ops-proc.running { border-left-color: var(--up-color); }
+.ops-proc.crashed, .ops-proc.degraded { border-left-color: var(--down-color); }
+.ops-proc.starting { border-left-color: var(--warn-color); }
+.ops-proc.completed, .ops-proc.stopped { border-left-color: var(--text-muted); }
+.ops-proc-head { display: flex; justify-content: space-between; align-items: center; }
+.ops-proc-name { font-weight: 600; }
+.ops-proc-status { font-size: 0.65rem; text-transform: uppercase; padding: 2px 6px; border-radius: 10px; background: rgba(255,255,255,0.06); }
+.ops-proc-status.running { background: rgba(38,166,154,0.15); color: var(--up-color); }
+.ops-proc-status.crashed, .ops-proc-status.degraded { background: rgba(239,83,80,0.15); color: var(--down-color); }
+.ops-proc-status.starting { background: rgba(255,167,38,0.15); color: var(--warn-color); }
+.ops-proc-meta { display: flex; flex-wrap: wrap; gap: 0.5rem; font-size: 0.7rem; color: var(--text-muted); margin: 0.35rem 0; }
+.ops-proc-lastlog { font-size: 0.7rem; font-family: monospace; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ops-proc-lastlog.error, .ops-proc-lastlog.critical { color: var(--down-color); }
+.ops-proc-lastlog.warning { color: var(--warn-color); }
+.ops-tb { font-size: 0.65rem; max-height: 90px; overflow: auto; background: rgba(239,83,80,0.06); padding: 0.3rem; border-radius: 4px; margin: 0.3rem 0; white-space: pre-wrap; }
+.ops-proc-actions { display: flex; gap: 0.35rem; margin-top: 0.4rem; }
+.ops-proc-actions .log-btn { font-size: 0.65rem; padding: 2px 8px; }
+.ops-logs-section { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
+.ops-logs-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem; }
+.ops-filters { display: flex; gap: 0.4rem; align-items: center; }
+.ops-filters select { background: var(--bg-card, #11151f); color: var(--text-primary); border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; padding: 3px 6px; font-size: 0.7rem; }
+.ops-logs { flex: 1; overflow-y: auto; background: #0a0d13; border: 1px solid rgba(255,255,255,0.07); border-radius: 8px; padding: 0.5rem; font-family: monospace; font-size: 0.72rem; }
+.ops-log-line { display: flex; gap: 0.6rem; padding: 1px 0; white-space: pre-wrap; }
+.ops-log-t { color: var(--text-muted); flex-shrink: 0; }
+.ops-log-p { color: #64B5F6; flex-shrink: 0; min-width: 110px; }
+.ops-log-lvl { flex-shrink: 0; min-width: 60px; color: var(--text-muted); }
+.ops-log-line.warning .ops-log-lvl, .ops-log-line.warning .ops-log-m { color: var(--warn-color); }
+.ops-log-line.error .ops-log-lvl, .ops-log-line.error .ops-log-m,
+.ops-log-line.critical .ops-log-lvl, .ops-log-line.critical .ops-log-m { color: var(--down-color); }
+.ops-log-m { color: var(--text-primary); word-break: break-word; }
+
+/* ============================================
    PORTFOLIO BAR (enriched)
    ============================================ */
 

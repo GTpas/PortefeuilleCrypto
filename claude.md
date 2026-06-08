@@ -91,6 +91,35 @@ Aucune logique aléatoire ne doit rester dans la chaîne décisionnelle finale.
 - Module central `metrics.py` (Prometheus, dégrade en no-op si indisponible). Workers exposés via `start_metrics_server` sur des ports dédiés (`config.METRICS_PORT_*` : ingestor 9101, feature 9102, social 9103, bot 9104). L'API expose `/metrics`.
 - Métriques clés : `market_events_total`, `queue_depth`, `db_write_latency_ms`, `rows_written_total`, `dlq_total`, `social_posts_collected_total`, `ai_decisions_total`, `paper_orders_total`, `worker_last_success_ts`.
 
+### Données réelles uniquement (PR2 — RÈGLE ABSOLUE)
+**Ne jamais afficher une donnée comme réelle si elle provient d'un mock, d'un random ou d'un placeholder.** Si la donnée réelle n'existe pas, l'UI affiche explicitement `unavailable` / `n/a` / "no real social feed configured" / "No real source evidence available" — jamais une valeur fabriquée.
+- **Social = mock uniquement aujourd'hui** : `social/mock_collector.py` est la seule source. Gated derrière `ENABLE_MOCK_SOCIAL` (défaut **False**, opt-in dev). Marqueur mock fiable = `tracked_source.name ILIKE 'mock%'` (le flag `{"mock":true}` du payload est perdu à l'écriture). L'API filtre le mock de l'evidence/sources ; `signal_quality_audit.has_sufficient_social` porte la disponibilité réelle → frontend affiche `SOC n/a` si faux.
+- **`signal_engine/scorer.py`** distingue `social: real|unavailable|fallback`, expose `data_quality` + `missing_features`. Une absence de social ⇒ `s_social` **neutre 0.0** (jamais le score baissier fantôme produit par `normalize(0,0,4)=-1`).
+- **Fraîcheur marché** : WS `/ws/live` porte `data_age_ms`/`stale` ; `GET /api/health` renvoie le statut DB + l'âge OHLCV par symbole. L'UI retire le badge LIVE → **STALE** quand le prix se fige.
+
+### Supervisor & Ops / Terminals (PR2)
+Lancement unique du stack local (ne dépend plus de multiples terminaux Windows) :
+```
+python scripts/dev_supervisor.py
+```
+- **`workers/process_supervisor.py`** : cœur réutilisable et testable. Possède le cycle de vie des process enfants, capture stdout/stderr ligne à ligne, classe le niveau (INFO/WARNING/ERROR/CRITICAL), **accumule les tracebacks Python**, auto-restart avec **backoff exponentiel** borné par un budget glissant (`OPS_MAX_RESTARTS` / `OPS_RESTART_WINDOW_S`) → état `degraded` + **incident structuré** (format Phase 9) au-delà.
+- **`scripts/dev_supervisor.py`** : construit la liste des process **uniquement à partir des fichiers réellement présents** (jamais de worker supposé) : `docker compose up -d` (oneshot) → `workers.bootstrap` (oneshot) → `ingestor`/`aggregator`/`feature_worker`/`social_ingestor`/`antigravity_bot` → `uvicorn api.main:app` (:8000). Sert l'**Ops API** sur `:8050` (`config.OPS_HOST/OPS_PORT`).
+- **Endpoints Ops** (port 8050) : `GET /api/ops/status|processes|events|incidents|health`, `POST /api/ops/process/{start,stop,restart}` (body `{"name": ...}`), `POST /api/ops/frontend-error`, `WS /ws/ops` (flux temps réel : `log` / `status` / `incident`). Aucun shell brut — uniquement ces actions contrôlées.
+- **Cockpit** : panneau **🖥 Ops** (header) — statut/PID/uptime/restarts/dernier log/dernier traceback par process, boutons start/stop/restart, logs temps réel filtrables (process + niveau), badge `Ops n/m` en header. Base configurable via `window.OPS_URL` (défaut `http://<host>:8050`).
+- **Incidents** : persistés dans `logs/ops_incidents.jsonl` + diffusés sur `/ws/ops`. Brancher un webhook/Claude réel = `ProcessSupervisor.on_incident` (point d'extension, jamais d'incident fabriqué).
+
+### Ports
+| Service | Port |
+|---|---|
+| API / cockpit | 8000 |
+| Ops supervisor (API + WS) | 8050 |
+| Prometheus workers | 9101–9104 |
+| PostgreSQL/TimescaleDB | 5432 |
+| Redis | 6379 |
+
+### Tests
+`pytest -q` (offline, pas de DB requise) : `test_scorer_thresholds`, `test_social_availability` (garde-fous anti-mock), `test_process_supervisor` (capture stdout/stderr + crash + traceback sur **vrais** subprocess), `test_engine_decimal`.
+
 ## Politique sources
 Sources prioritaires:
 1. code existant

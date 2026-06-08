@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     # Decision safety
     MAX_DATA_AGE_S: int = Field(default=30, description="Max age (seconds) of latest market quote before the risk engine blocks trading (data_stale gate)")
 
+    # Ops supervisor (local dev process manager + Ops/Terminals panel)
+    OPS_HOST: str = Field(default="127.0.0.1", description="Bind host for the Ops supervisor HTTP/WS server")
+    OPS_PORT: int = Field(default=8050, description="Port for the Ops supervisor API (/api/ops/*, /ws/ops)")
+    OPS_MAX_RESTARTS: int = Field(default=5, description="Max auto-restarts of a process within OPS_RESTART_WINDOW_S before it is marked degraded")
+    OPS_RESTART_WINDOW_S: int = Field(default=120, description="Sliding window (s) for the restart budget")
+
     # Observability — Prometheus metrics HTTP ports (one per worker process)
     METRICS_ENABLED: bool = Field(default=True, description="Expose Prometheus metrics from workers")
     METRICS_PORT_INGESTOR: int = Field(default=9101)

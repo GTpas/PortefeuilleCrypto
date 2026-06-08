@@ -22,9 +22,11 @@
                 <h1>Antigravity <span>Cockpit</span></h1>
             </div>
             <div class="controls">
+                <button id="ops-btn" class="log-btn">🖥 Ops</button>
                 <button id="logs-btn" class="log-btn">📋 Logs</button>
                 <label for="symbol-select">Market:</label>
                 <select id="symbol-select"></select>
+                <span id="ops-status" class="status-badge disconnected" title="Ops supervisor status">Ops ?</span>
                 <span id="ws-status" class="status-badge disconnected">Offline</span>
             </div>
         </header>
@@ -169,6 +171,41 @@
             </div>
             <div class="modal-body">
                 <div id="timeline-container"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- OPS / TERMINALS MODAL -->
+    <div id="ops-modal" class="modal hidden">
+        <div class="modal-content ops-content">
+            <div class="modal-header">
+                <h2>Ops / Terminals</h2>
+                <div class="ops-header-right">
+                    <span id="ops-conn" class="status-badge disconnected">stream offline</span>
+                    <button id="close-ops" class="close-btn">&times;</button>
+                </div>
+            </div>
+            <div class="modal-body ops-body">
+                <div class="ops-processes" id="ops-processes">
+                    <!-- process cards populated by JS -->
+                </div>
+                <div class="ops-logs-section">
+                    <div class="ops-logs-toolbar">
+                        <span class="panel-title">Live logs</span>
+                        <div class="ops-filters">
+                            <select id="ops-filter-process"><option value="">all processes</option></select>
+                            <select id="ops-filter-level">
+                                <option value="">all levels</option>
+                                <option value="INFO">INFO+</option>
+                                <option value="WARNING">WARNING+</option>
+                                <option value="ERROR">ERROR+</option>
+                                <option value="CRITICAL">CRITICAL</option>
+                            </select>
+                            <button id="ops-clear-logs" class="log-btn">Clear</button>
+                        </div>
+                    </div>
+                    <div id="ops-logs" class="ops-logs"></div>
+                </div>
             </div>
         </div>
     </div>

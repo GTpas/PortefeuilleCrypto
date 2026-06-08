@@ -687,10 +687,214 @@ function setupLogging() {
     }, 5000);
 }
 
+// ── Ops / Terminals ────────────────────────
+// Talks to the dev supervisor (scripts/dev_supervisor.py), default :8050.
+// All data is real process state — never placeholders.
+
+const OPS_BASE = window.OPS_URL || (`http://${window.location.hostname}:${window.OPS_PORT || 8050}`);
+const OPS_WS_URL = OPS_BASE.replace(/^http/, 'ws') + '/ws/ops';
+
+const opsState = { ws: null, logs: [], filterProcess: '', filterLevel: '', open: false, knownProcs: new Set() };
+const LEVEL_RANK = { DEBUG: 0, INFO: 1, WARNING: 2, ERROR: 3, CRITICAL: 4 };
+
+async function loadOpsStatus() {
+    try {
+        const res = await fetch(`${OPS_BASE}/api/ops/status`);
+        const st = await res.json();
+        renderOpsHeaderBadge(st);
+        if (opsState.open) renderOpsProcesses(st.processes || []);
+        return st;
+    } catch (e) {
+        renderOpsHeaderBadge(null);
+        return null;
+    }
+}
+
+function renderOpsHeaderBadge(st) {
+    const badge = document.getElementById('ops-status');
+    if (!badge) return;
+    if (!st) { badge.textContent = 'Ops down'; badge.className = 'status-badge disconnected'; return; }
+    const cls = st.status === 'ok' ? 'connected' : st.status === 'degraded' ? 'stale' : 'disconnected';
+    badge.textContent = `Ops ${st.running}/${st.total}`;
+    badge.className = 'status-badge ' + cls;
+}
+
+function renderOpsProcesses(procs) {
+    const c = document.getElementById('ops-processes');
+    if (!c) return;
+    c.innerHTML = '';
+    const sel = document.getElementById('ops-filter-process');
+    procs.forEach(p => {
+        if (!opsState.knownProcs.has(p.name)) {
+            opsState.knownProcs.add(p.name);
+            const o = document.createElement('option'); o.value = p.name; o.textContent = p.name; sel.appendChild(o);
+        }
+        const card = document.createElement('div');
+        card.className = 'ops-proc ' + p.status;
+        const uptime = p.uptime_s != null ? fmtUptime(p.uptime_s) : '—';
+        const tb = p.last_traceback ? `<pre class="ops-tb">${escapeHtml(p.last_traceback)}</pre>` : '';
+        card.innerHTML = `
+            <div class="ops-proc-head">
+                <span class="ops-proc-name">${p.name}</span>
+                <span class="ops-proc-status ${p.status}">${p.status}</span>
+            </div>
+            <div class="ops-proc-meta">
+                <span>PID ${p.pid ?? '—'}</span>
+                <span>up ${uptime}</span>
+                <span>restarts ${p.restarts}</span>
+                ${p.exit_code != null ? `<span>exit ${p.exit_code}</span>` : ''}
+            </div>
+            <div class="ops-proc-lastlog ${(p.last_log_level || 'INFO').toLowerCase()}">${escapeHtml(p.last_log || '')}</div>
+            ${tb}
+            <div class="ops-proc-actions">
+                <button class="log-btn" data-act="start" data-proc="${p.name}">Start</button>
+                <button class="log-btn" data-act="restart" data-proc="${p.name}">Restart</button>
+                <button class="log-btn" data-act="stop" data-proc="${p.name}">Stop</button>
+            </div>
+        `;
+        card.querySelectorAll('button[data-act]').forEach(b => {
+            b.addEventListener('click', () => controlOpsProcess(b.dataset.proc, b.dataset.act));
+        });
+        c.appendChild(card);
+    });
+}
+
+function fmtUptime(s) {
+    s = Math.floor(s);
+    if (s < 60) return s + 's';
+    if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+    return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+}
+
+async function controlOpsProcess(name, action) {
+    try {
+        await fetch(`${OPS_BASE}/api/ops/process/${action}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name }),
+        });
+        setTimeout(loadOpsStatus, 400);
+    } catch (e) { console.error('Ops control error:', e); }
+}
+
+function connectOpsWS() {
+    if (opsState.ws) { try { opsState.ws.close(); } catch (e) {} }
+    const conn = document.getElementById('ops-conn');
+    let ws;
+    try { ws = new WebSocket(OPS_WS_URL); } catch (e) { if (conn) { conn.textContent = 'stream offline'; conn.className = 'status-badge disconnected'; } return; }
+    opsState.ws = ws;
+    ws.onopen = () => { if (conn) { conn.textContent = 'streaming'; conn.className = 'status-badge connected'; } };
+    ws.onclose = () => {
+        if (conn) { conn.textContent = 'stream offline'; conn.className = 'status-badge disconnected'; }
+        if (opsState.open) setTimeout(connectOpsWS, 3000);
+    };
+    ws.onmessage = (ev) => {
+        let msg; try { msg = JSON.parse(ev.data); } catch (e) { return; }
+        if (msg.type === 'snapshot' && msg.status) {
+            renderOpsHeaderBadge(msg.status);
+            renderOpsProcesses(msg.status.processes || []);
+        } else if (msg.type === 'status') {
+            loadOpsStatus();
+        } else if (msg.type === 'log') {
+            pushOpsLog(msg);
+        } else if (msg.type === 'incident') {
+            pushOpsLog({ process: msg.process, level: 'CRITICAL', stream: 'incident',
+                message: `INCIDENT [${msg.severity}] ${msg.incident.suspected_root_cause}` });
+            loadOpsStatus();
+        }
+    };
+}
+
+function pushOpsLog(evt) {
+    opsState.logs.push(evt);
+    if (opsState.logs.length > 1000) opsState.logs.shift();
+    if (opsState.open) appendOpsLogLine(evt);
+}
+
+function logPassesFilter(evt) {
+    if (opsState.filterProcess && evt.process !== opsState.filterProcess) return false;
+    if (opsState.filterLevel) {
+        const r = LEVEL_RANK[(evt.level || 'INFO').toUpperCase()] ?? 1;
+        if (r < LEVEL_RANK[opsState.filterLevel]) return false;
+    }
+    return true;
+}
+
+function appendOpsLogLine(evt) {
+    if (!logPassesFilter(evt)) return;
+    const box = document.getElementById('ops-logs');
+    if (!box) return;
+    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+    const line = document.createElement('div');
+    line.className = 'ops-log-line ' + (evt.level || 'INFO').toLowerCase();
+    const t = new Date((evt.ts ? evt.ts * 1000 : Date.now())).toLocaleTimeString();
+    line.innerHTML = `<span class="ops-log-t">${t}</span><span class="ops-log-p">${evt.process}</span><span class="ops-log-lvl">${evt.level || ''}</span><span class="ops-log-m">${escapeHtml(evt.message || '')}</span>`;
+    box.appendChild(line);
+    while (box.childElementCount > 600) box.removeChild(box.firstChild);
+    if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
+function renderOpsLogs() {
+    const box = document.getElementById('ops-logs');
+    if (!box) return;
+    box.innerHTML = '';
+    opsState.logs.filter(logPassesFilter).slice(-600).forEach(appendOpsLogLine);
+    box.scrollTop = box.scrollHeight;
+}
+
+function setupOps() {
+    const modal = document.getElementById('ops-modal');
+    const btn = document.getElementById('ops-btn');
+    if (!modal || !btn) return;
+
+    btn.addEventListener('click', () => {
+        opsState.open = true;
+        modal.classList.remove('hidden');
+        loadOpsStatus();
+        renderOpsLogs();
+        connectOpsWS();
+    });
+    document.getElementById('close-ops').addEventListener('click', () => {
+        opsState.open = false;
+        modal.classList.add('hidden');
+        if (opsState.ws) { try { opsState.ws.close(); } catch (e) {} opsState.ws = null; }
+    });
+    document.getElementById('ops-filter-process').addEventListener('change', e => { opsState.filterProcess = e.target.value; renderOpsLogs(); });
+    document.getElementById('ops-filter-level').addEventListener('change', e => { opsState.filterLevel = e.target.value; renderOpsLogs(); });
+    document.getElementById('ops-clear-logs').addEventListener('click', () => { opsState.logs = []; renderOpsLogs(); });
+
+    // Header badge reflects supervisor health even when the panel is closed.
+    loadOpsStatus();
+    setInterval(loadOpsStatus, 5000);
+
+    // Phase 6/10: report uncaught frontend errors to the Ops pipeline (best-effort).
+    setupFrontendErrorReporter();
+}
+
+let _opsReportInFlight = false;
+function reportFrontendError(message, stack) {
+    if (_opsReportInFlight) return;
+    _opsReportInFlight = true;
+    fetch(`${OPS_BASE}/api/ops/frontend-error`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message, stack, url: window.location.href, ts: Date.now() }),
+    }).catch(() => {}).finally(() => { _opsReportInFlight = false; });
+}
+
+function setupFrontendErrorReporter() {
+    window.addEventListener('error', (e) => {
+        reportFrontendError(e.message || 'window.error', e.error && e.error.stack);
+    });
+    window.addEventListener('unhandledrejection', (e) => {
+        const r = e.reason || {};
+        reportFrontendError('unhandledrejection: ' + (r.message || String(r)), r.stack);
+    });
+}
+
 // ── Init ───────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
     setupLogging();
+    setupOps();
     initChart();
     loadSymbols();
 
