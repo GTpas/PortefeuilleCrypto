@@ -108,6 +108,38 @@ python scripts/dev_supervisor.py
 - **Cockpit** : panneau **🖥 Ops** (header) — statut/PID/uptime/restarts/dernier log/dernier traceback par process, boutons start/stop/restart, logs temps réel filtrables (process + niveau), badge `Ops n/m` en header. Base configurable via `window.OPS_URL` (défaut `http://<host>:8050`).
 - **Incidents** : persistés dans `logs/ops_incidents.jsonl` + diffusés sur `/ws/ops`. Brancher un webhook/Claude réel = `ProcessSupervisor.on_incident` (point d'extension, jamais d'incident fabriqué).
 
+### Lancement local (runbook)
+**En un clic depuis VS Code** : `Terminal → Run Task…` puis choisir :
+- **Start Dev Supervisor** — lance le supervisor (docker + bootstrap + workers + API) dans un terminal dédié. Commande exécutée : `$env:PYTHONPATH="."; python .\scripts\dev_supervisor.py`.
+- **Start Full Stack** — ouvre le supervisor dans une fenêtre dédiée **et** le cockpit dans le navigateur (ne relance rien que le supervisor possède déjà).
+- **Stop Full Stack** — stoppe supervisor + workers + uvicorn puis `docker compose down`.
+- **Run tests (offline)** — `pytest -q`.
+
+**En PowerShell** (depuis la racine du repo) :
+```powershell
+# script robuste (venv auto, URLs, garde-fous)
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_dev_supervisor.ps1
+# ou la commande directe :
+$env:PYTHONPATH="."; python .\scripts\dev_supervisor.py
+# full stack (nouvelle fenêtre + cockpit) :
+.\scripts\start_all.ps1
+# arrêt :
+.\scripts\stop_all.ps1
+```
+
+**Vérifier que tout fonctionne** :
+- Cockpit : http://localhost:8000/ — badge header `Ops n/m` doit passer au vert.
+- Ops API : http://localhost:8050/api/ops/health (statut, running/total).
+- Panneau **🖥 Ops** : process `running`, logs temps réel qui défilent.
+- Marché : badge passe `Connecting… → Waiting data → Live` ; **jamais `Live` sans bougie réelle** (`No data`/`Waiting data`/`STALE` sinon).
+
+**Problèmes fréquents** :
+- **`Jeton inattendu « python »` / token error** : tu as écrit `$env:PYTHONPATH="." python ...`. ✅ Correct = **`$env:PYTHONPATH="."; python .\scripts\dev_supervisor.py`** (point-virgule entre l'affectation et la commande — PowerShell n'autorise pas deux commandes adjacentes).
+- **Port 8050 déjà occupé** : un supervisor tourne déjà → `Stop Full Stack` (ou `.\scripts\stop_all.ps1`) avant de relancer.
+- **`Ops API unavailable`** dans le panneau : le supervisor n'est pas lancé → `Start Dev Supervisor`. URL ajustable via `window.OPS_URL` (console navigateur) si tu changes `OPS_PORT`.
+- **Python/venv absent** : `python -m venv venv ; .\venv\Scripts\pip install -r requirements.txt`.
+- **`.ps1` bloqué par l'ExecutionPolicy** : les tâches/commandes utilisent `-ExecutionPolicy Bypass` ; en manuel, lance via `powershell -ExecutionPolicy Bypass -File ...`.
+
 ### Ports
 | Service | Port |
 |---|---|
@@ -118,7 +150,7 @@ python scripts/dev_supervisor.py
 | Redis | 6379 |
 
 ### Tests
-`pytest -q` (offline, pas de DB requise) : `test_scorer_thresholds`, `test_social_availability` (garde-fous anti-mock), `test_process_supervisor` (capture stdout/stderr + crash + traceback sur **vrais** subprocess), `test_engine_decimal`.
+`pytest -q` (offline, pas de DB requise) : `test_scorer_thresholds`, `test_social_availability` (garde-fous anti-mock), `test_process_supervisor` (capture stdout/stderr + crash + traceback sur **vrais** subprocess), `test_ops_api` (logique Ops + routes), `test_launch_scripts` (tasks.json + scripts PowerShell valides), `test_engine_decimal`.
 
 ## Gestion automatique des terminaux par Claude
 

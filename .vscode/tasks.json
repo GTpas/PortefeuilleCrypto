@@ -1,0 +1,76 @@
+{
+    "version": "2.0.0",
+    "options": {
+        "shell": {
+            "executable": "powershell.exe",
+            "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+        }
+    },
+    "tasks": [
+        {
+            "label": "Start Dev Supervisor",
+            "detail": "Lance le supervisor local (docker + bootstrap + workers + API + Ops API :8050).",
+            "type": "shell",
+            "command": "$env:PYTHONPATH=\".\"; if (Test-Path .\\venv\\Scripts\\python.exe) { .\\venv\\Scripts\\python.exe .\\scripts\\dev_supervisor.py } else { python .\\scripts\\dev_supervisor.py }",
+            "isBackground": true,
+            "problemMatcher": [],
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "dedicated",
+                "group": "antigravity",
+                "showReuseMessage": false,
+                "clear": false
+            }
+        },
+        {
+            "label": "Start Full Stack",
+            "detail": "Ouvre le supervisor dans une fenetre dediee et le cockpit dans le navigateur.",
+            "type": "shell",
+            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\start_all.ps1",
+            "problemMatcher": [],
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "dedicated",
+                "group": "antigravity",
+                "showReuseMessage": false,
+                "clear": true
+            }
+        },
+        {
+            "label": "Stop Full Stack",
+            "detail": "Stoppe le supervisor + workers + uvicorn et fait docker compose down.",
+            "type": "shell",
+            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\stop_all.ps1",
+            "problemMatcher": [],
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": true,
+                "panel": "dedicated",
+                "group": "antigravity",
+                "showReuseMessage": false,
+                "clear": true
+            }
+        },
+        {
+            "label": "Run tests (offline)",
+            "detail": "pytest -q (aucune DB requise).",
+            "type": "shell",
+            "command": "$env:PYTHONPATH=\".\"; if (Test-Path .\\venv\\Scripts\\python.exe) { .\\venv\\Scripts\\python.exe -m pytest -q } else { python -m pytest -q }",
+            "group": { "kind": "test", "isDefault": true },
+            "problemMatcher": [],
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": true,
+                "panel": "dedicated",
+                "group": "antigravity",
+                "clear": true
+            }
+        }
+    ]
+}

@@ -103,50 +103,97 @@ async function loadHistorical(symbol) {
 
 // ── WebSocket ──────────────────────────────
 
-function connectWebSocket(symbol) {
+// Market feed state — keeps WS-connectivity SEPARATE from data-received so the
+// badge never shows "Live" without real candles. States:
+//   offline      → socket down
+//   connecting   → socket opening
+//   waiting      → socket open, no data yet (or none for a while)
+//   nodata       → server confirmed there is no OHLCV for this symbol
+//   live         → fresh candle flowing
+//   stale        → candle exists but stopped advancing (> MAX_DATA_AGE_S)
+const WAIT_DATA_MS = 6000;            // socket open but silent this long → "Waiting data"
+const feedState = { connected: false, gotData: false, lastMsgAt: 0, symbol: '' };
+let feedWatchdog = null;
+
+function setFeedBadge(state, ageMs) {
     const badge = document.getElementById('ws-status');
-    badge.textContent = 'Connecting…'; badge.className = 'status-badge';
+    if (!badge) return;
+    const map = {
+        offline:    ['Offline',      'disconnected'],
+        connecting: ['Connecting…',  ''],
+        waiting:    ['Waiting data', 'stale'],
+        nodata:     ['No data',      'disconnected'],
+        live:       ['Live',         'connected'],
+        stale:      ['STALE' + (typeof ageMs === 'number' ? ` ${Math.round(ageMs / 1000)}s` : ''), 'stale'],
+    };
+    const [text, cls] = map[state] || map.offline;
+    badge.textContent = text;
+    badge.className = 'status-badge ' + cls;
+    badge.dataset.state = state;
+}
+
+function connectWebSocket(symbol) {
+    feedState.connected = false; feedState.gotData = false; feedState.symbol = symbol;
+    setFeedBadge('connecting');
 
     ws = new WebSocket(`${WS_URL}/${encodeURIComponent(symbol)}`);
 
-    ws.onopen = () => { badge.textContent = 'Live'; badge.className = 'status-badge connected'; };
+    ws.onopen = () => {
+        feedState.connected = true;
+        feedState.lastMsgAt = Date.now();
+        // Connected but no data confirmed yet — explicitly NOT "Live".
+        setFeedBadge('waiting');
+    };
 
     ws.onmessage = (event) => {
         try {
             const msg = JSON.parse(event.data);
+            feedState.lastMsgAt = Date.now();
+
+            if (msg.type === 'nodata') {
+                feedState.gotData = false;
+                setFeedBadge('nodata');
+                updateCurrentPriceUnavailable();
+                return;
+            }
             if (msg.type !== 'candle') return;
             const d = msg.data;
             if (!d || d.time == null || d.open == null || d.close == null) return;
+            feedState.gotData = true;
             try {
                 candlestickSeries.update({ time: d.time, open: d.open, high: d.high, low: d.low, close: d.close });
                 volumeSeries.update({ time: d.time, value: d.value || 0, color: d.close >= d.open ? 'rgba(38,166,154,0.5)' : 'rgba(239,83,80,0.5)' });
             } catch (e) { /* chart update error, ignore silently */ }
             updateCurrentPrice(d.close, d.close >= d.open);
-            // Honest freshness: if the latest candle stopped advancing, drop LIVE
-            // and show STALE rather than implying a live feed.
-            updateFreshnessBadge(msg.stale === true, msg.data_age_ms);
+            // Honest freshness: stale candle → STALE, never a misleading LIVE.
+            setFeedBadge(msg.stale === true ? 'stale' : 'live', msg.data_age_ms);
         } catch (e) { console.error('WS parse error:', e); }
     };
 
     ws.onclose = () => {
-        badge.textContent = 'Offline'; badge.className = 'status-badge disconnected';
+        feedState.connected = false;
+        setFeedBadge('offline');
         setTimeout(() => { if (currentSymbol === symbol) connectWebSocket(symbol); }, 3000);
     };
 }
 
-function updateFreshnessBadge(isStale, ageMs) {
-    const badge = document.getElementById('ws-status');
-    if (!badge) return;
-    // Only override when the socket is up (don't stomp Offline/Connecting).
-    if (badge.textContent === 'Offline' || badge.textContent === 'Connecting…') return;
-    if (isStale) {
-        const secs = (typeof ageMs === 'number') ? ` ${Math.round(ageMs / 1000)}s` : '';
-        badge.textContent = 'STALE' + secs;
-        badge.className = 'status-badge stale';
-    } else {
-        badge.textContent = 'Live';
-        badge.className = 'status-badge connected';
-    }
+// Watchdog: socket open but silent for too long → "Waiting data" (never leave a
+// stale "Live"). Runs independently of message cadence.
+function startFeedWatchdog() {
+    if (feedWatchdog) clearInterval(feedWatchdog);
+    feedWatchdog = setInterval(() => {
+        if (!feedState.connected) return;
+        const silentFor = Date.now() - feedState.lastMsgAt;
+        const badge = document.getElementById('ws-status');
+        if (silentFor > WAIT_DATA_MS && badge && badge.dataset.state !== 'nodata') {
+            setFeedBadge('waiting');
+        }
+    }, 2000);
+}
+
+function updateCurrentPriceUnavailable() {
+    const el = document.getElementById('current-price');
+    if (el) { el.textContent = '--'; el.className = 'current-price'; }
 }
 
 function updateCurrentPrice(price, isUp) {
@@ -706,8 +753,25 @@ async function loadOpsStatus() {
         return st;
     } catch (e) {
         renderOpsHeaderBadge(null);
+        if (opsState.open) showOpsUnavailable();
         return null;
     }
+}
+
+function showOpsUnavailable() {
+    const c = document.getElementById('ops-processes');
+    if (!c) return;
+    c.innerHTML = `
+        <div class="ops-unavailable">
+            <div class="ops-unavailable-title">⚠ Ops API unavailable</div>
+            <div>Pas de réponse de <code>${OPS_BASE}</code>.</div>
+            <div>Lance le supervisor :</div>
+            <pre>$env:PYTHONPATH="."; python .\\scripts\\dev_supervisor.py</pre>
+            <div>ou via VS Code : <b>Terminal → Run Task… → Start Dev Supervisor</b>.</div>
+            <div class="ops-unavailable-hint">URL configurable via <code>window.OPS_URL</code>.</div>
+        </div>`;
+    const conn = document.getElementById('ops-conn');
+    if (conn) { conn.textContent = 'stream offline'; conn.className = 'status-badge disconnected'; }
 }
 
 function renderOpsHeaderBadge(st) {
@@ -895,6 +959,7 @@ function setupFrontendErrorReporter() {
 document.addEventListener('DOMContentLoaded', () => {
     setupLogging();
     setupOps();
+    startFeedWatchdog();
     initChart();
     loadSymbols();
 

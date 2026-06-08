@@ -518,10 +518,13 @@ async def get_health():
         return {"status": "degraded", "db_status": db_status, "error": str(e), "symbols": symbols}
 
     any_fresh = any(s["status"] == "fresh" for s in symbols)
+    # Honest social-source state — never imply a real feed when there is none.
+    social_source = "mock-only" if settings.ENABLE_MOCK_SOCIAL else "not_configured"
     return {
         "status": "ok" if (db_status == "up" and any_fresh) else "degraded",
         "db_status": db_status,
         "max_data_age_ms": max_age_ms,
+        "social_source": social_source,
         "symbols": symbols,
     }
 
@@ -726,6 +729,14 @@ async def websocket_endpoint(websocket: WebSocket, symbol: str):
                     }
                     await websocket.send_text(json.dumps(candle_data))
                     last_candle_time = record['bucket_start']
+                else:
+                    # No OHLCV at all for this symbol — tell the UI explicitly so
+                    # it shows "No data" instead of a misleading LIVE badge.
+                    await websocket.send_text(json.dumps({
+                        "type": "nodata",
+                        "symbol": symbol,
+                        "reason": "no_ohlcv",
+                    }))
 
             await asyncio.sleep(1)
 

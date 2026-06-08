@@ -22,6 +22,7 @@ import json
 import os
 import sys
 import time
+from contextlib import asynccontextmanager
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -95,16 +96,15 @@ def _incident_sink(incident: dict) -> None:
 # ── Ops API ─────────────────────────────────────────────────────────────────
 
 def build_app(sup: ProcessSupervisor) -> FastAPI:
-    app = FastAPI(title="Antigravity Ops Supervisor")
-    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-
-    @app.on_event("startup")
-    async def _startup():
-        asyncio.create_task(sup.start_all())
-
-    @app.on_event("shutdown")
-    async def _shutdown():
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        task = asyncio.create_task(sup.start_all())
+        yield
+        task.cancel()
         await sup.stop_all()
+
+    app = FastAPI(title="Antigravity Ops Supervisor", lifespan=lifespan)
+    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
     @app.get("/api/ops/status")
     async def ops_status():

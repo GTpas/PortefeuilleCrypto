@@ -167,6 +167,10 @@ select:hover, select:focus { border-color: var(--accent-color); }
 .ops-log-line.error .ops-log-lvl, .ops-log-line.error .ops-log-m,
 .ops-log-line.critical .ops-log-lvl, .ops-log-line.critical .ops-log-m { color: var(--down-color); }
 .ops-log-m { color: var(--text-primary); word-break: break-word; }
+.ops-unavailable { grid-column: 1 / -1; padding: 1rem; border: 1px dashed rgba(255,167,38,0.4); border-radius: 8px; background: rgba(255,167,38,0.05); font-size: 0.8rem; line-height: 1.6; }
+.ops-unavailable-title { color: var(--warn-color); font-weight: 700; margin-bottom: 0.4rem; }
+.ops-unavailable pre { background: #0a0d13; padding: 0.5rem; border-radius: 6px; margin: 0.4rem 0; font-size: 0.75rem; overflow-x: auto; }
+.ops-unavailable-hint { color: var(--text-muted); margin-top: 0.4rem; }
 
 /* ============================================
    PORTFOLIO BAR (enriched)

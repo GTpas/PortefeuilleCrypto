@@ -3,6 +3,10 @@ __pycache__/
 *.pyc
 .env
 .idea/
-.vscode/
+# Ignore personal VS Code settings but SHARE the task definitions.
+.vscode/*
+!.vscode/tasks.json
 *.db
 .DS_Store
+# Supervisor runtime artifacts (incidents, captured logs)
+logs/
