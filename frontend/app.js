@@ -11,6 +11,34 @@ const WS_URL = `ws://${window.location.host}/ws/live`;
 let chart, candlestickSeries, volumeSeries, ws;
 let currentSymbol = '';
 
+// Binance live-layer config (price/candle source). Fetched once on load so the
+// cockpit knows whether to draw Binance klines and which source the big number is.
+let liveConfig = { enabled: false, price_source: 'trade', candle_source: 'derived_trades', candle_interval: '1m', max_age_ms: 3000 };
+let lastLiveSnap = null;  // most recent /ws/live "live" payload, shown in the 🔬 Source panel
+
+async function loadLiveConfig() {
+    try {
+        const res = await fetch(`${API_URL}/binance/config`);
+        const cfg = await res.json();
+        if (cfg && !cfg.error) liveConfig = cfg;
+    } catch (e) { /* keep defaults; chart falls back to derived OHLCV */ }
+    updateChartSourceBadge();
+}
+
+function updateChartSourceBadge() {
+    const el = document.getElementById('chart-source-badge');
+    if (!el) return;
+    if (liveConfig.enabled) {
+        el.textContent = `${liveConfig.price_source} · ${liveConfig.candle_interval}`;
+        el.className = 'source-badge';
+        el.title = `Displayed price = Binance Spot ${liveConfig.price_source} · chart ${liveConfig.candle_source} ${liveConfig.candle_interval}`;
+    } else {
+        el.textContent = 'derived · 1s';
+        el.className = 'source-badge derived';
+        el.title = 'Binance live hub disabled — price/candles derived from DB OHLCV (may lag)';
+    }
+}
+
 // ── Chart ──────────────────────────────────
 
 function initChart() {
@@ -83,8 +111,21 @@ async function switchSymbol(symbol) {
 
 async function loadHistorical(symbol) {
     try {
-        const res = await fetch(`${API_URL}/historical/${encodeURIComponent(symbol)}`);
-        const data = await res.json();
+        let data;
+        // Prefer real Binance klines (matches Binance UI at the configured interval).
+        if (liveConfig.enabled && liveConfig.candle_source === 'binance_kline') {
+            const kres = await fetch(`${API_URL}/binance/klines/${encodeURIComponent(symbol)}`);
+            const kjson = await kres.json();
+            data = (kjson && kjson.candles) ? kjson.candles : [];
+            if (!data.length) {
+                // hub not warmed up yet → fall back to derived OHLCV so the chart isn't blank
+                const res = await fetch(`${API_URL}/historical/${encodeURIComponent(symbol)}`);
+                data = await res.json();
+            }
+        } else {
+            const res = await fetch(`${API_URL}/historical/${encodeURIComponent(symbol)}`);
+            data = await res.json();
+        }
         if (!data || !data.length) return;
 
         const seen = new Set(), unique = [];
@@ -108,9 +149,12 @@ async function loadHistorical(symbol) {
 //   offline      → socket down
 //   connecting   → socket opening
 //   waiting      → socket open, no data yet (or none for a while)
-//   nodata       → server confirmed there is no OHLCV for this symbol
-//   live         → fresh candle flowing
-//   stale        → candle exists but stopped advancing (> MAX_DATA_AGE_S)
+//   nodata       → server: WS connected but NO real Binance event received yet
+//   live         → fresh real Binance event flowing (< BINANCE_LIVE_MAX_AGE_MS)
+//   stale        → real data exists but stopped advancing (> max age)
+//   mock         → data came from a mock/simulated source (never for Binance price)
+// The badge separates four facts the user asked for: socket connected, Binance
+// data received, data fresh, and source real-vs-mock.
 const WAIT_DATA_MS = 6000;            // socket open but silent this long → "Waiting data"
 const feedState = { connected: false, gotData: false, lastMsgAt: 0, symbol: '' };
 let feedWatchdog = null;
@@ -125,11 +169,17 @@ function setFeedBadge(state, ageMs) {
         nodata:     ['No data',      'disconnected'],
         live:       ['Live',         'connected'],
         stale:      ['STALE' + (typeof ageMs === 'number' ? ` ${Math.round(ageMs / 1000)}s` : ''), 'stale'],
+        mock:       ['MOCK',         'mock'],
     };
     const [text, cls] = map[state] || map.offline;
     badge.textContent = text;
     badge.className = 'status-badge ' + cls;
     badge.dataset.state = state;
+}
+
+// Map the server's authoritative feed_status onto a badge state.
+function badgeFromFeedStatus(feedStatus) {
+    return ({ live: 'live', stale: 'stale', nodata: 'nodata', mock: 'mock' })[feedStatus] || 'waiting';
 }
 
 function connectWebSocket(symbol) {
@@ -156,6 +206,33 @@ function connectWebSocket(symbol) {
                 updateCurrentPriceUnavailable();
                 return;
             }
+
+            // ── Binance Spot live payload (real-time, source-pinned) ──
+            if (msg.type === 'live') {
+                lastLiveSnap = msg;
+                const price = msg.displayed_price;
+                if (price == null) { setFeedBadge('nodata'); updateCurrentPriceUnavailable(); return; }
+                feedState.gotData = true;
+                // Direction from the in-progress candle if present, else 24h change sign.
+                const isUp = msg.candle ? (msg.candle.close >= msg.candle.open)
+                          : (msg.ticker ? msg.ticker.price_change >= 0 : true);
+                updateCurrentPrice(price, isUp);
+                if (msg.candle && msg.candle.time != null) {
+                    try {
+                        const c = msg.candle;
+                        candlestickSeries.update({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close });
+                        volumeSeries.update({ time: c.time, value: c.value || 0, color: c.close >= c.open ? 'rgba(38,166,154,0.5)' : 'rgba(239,83,80,0.5)' });
+                    } catch (e) { /* chart update error, ignore */ }
+                }
+                if (msg.micro) applyLiveMicrostructure(msg.micro);
+                if (document.getElementById('live-debug-modal') && !document.getElementById('live-debug-modal').classList.contains('hidden')) {
+                    renderLiveDebug(msg);
+                }
+                setFeedBadge(badgeFromFeedStatus(msg.feed_status), msg.data_age_ms);
+                return;
+            }
+
+            // ── Fallback: DB-derived candle ──
             if (msg.type !== 'candle') return;
             const d = msg.data;
             if (!d || d.time == null || d.open == null || d.close == null) return;
@@ -315,6 +392,36 @@ async function updateSignals() {
 
 // ── Microstructure ─────────────────────────
 
+// Shared microstructure cell setter (threshold colouring). value == null → "n/a"
+// so a metric not yet wired to a real source is never shown as a fabricated 0.
+function setMicro(id, value, goodThresh, badThresh, format, invert = false) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (value == null || Number.isNaN(value)) { el.textContent = 'n/a'; el.className = 'micro-value'; return; }
+    el.textContent = format(value);
+    let cls = 'micro-value';
+    if (invert) {
+        if (value <= goodThresh) cls += ' good';
+        else if (value >= badThresh) cls += ' bad';
+        else cls += ' warn';
+    } else {
+        if (value >= goodThresh) cls += ' good';
+        else if (value <= badThresh) cls += ' bad';
+        else cls += ' warn';
+    }
+    el.className = cls;
+}
+
+// Real-time microstructure from the Binance hub (spread/depth/imbalance/slippage).
+// Pushed on every /ws/live tick so these match Binance; trade_pressure and
+// relative_volume stay on the slower DB poll (the hub doesn't compute them).
+function applyLiveMicrostructure(m) {
+    if (m.spread_bps != null) setMicro('micro-spread', m.spread_bps, 3, 10, v => v.toFixed(1) + ' bps', true);
+    setMicro('micro-depth', m.depth_usd_10bps, 5000, 1000, v => '$' + v.toLocaleString('en-US', {maximumFractionDigits: 0}));
+    setMicro('micro-imbalance', m.imbalance, 0.1, -0.1, v => (v >= 0 ? '+' : '') + v.toFixed(3));
+    setMicro('micro-slippage', m.slippage_bps_est, 5, 20, v => v.toFixed(1) + ' bps', true);
+}
+
 async function updateMicrostructure(symbol) {
     if (!symbol) symbol = currentSymbol;
     if (!symbol) return;
@@ -331,29 +438,101 @@ async function updateMicrostructure(symbol) {
             return;
         }
 
-        const setMicro = (id, value, goodThresh, badThresh, format, invert = false) => {
-            const el = document.getElementById(id);
-            el.textContent = format(value);
-            let cls = 'micro-value';
-            if (invert) {
-                if (value <= goodThresh) cls += ' good';
-                else if (value >= badThresh) cls += ' bad';
-                else cls += ' warn';
-            } else {
-                if (value >= goodThresh) cls += ' good';
-                else if (value <= badThresh) cls += ' bad';
-                else cls += ' warn';
-            }
-            el.className = cls;
-        };
-
-        setMicro('micro-spread', d.spread_bps, 3, 10, v => v.toFixed(1) + ' bps', true);
-        setMicro('micro-depth', d.depth_usd_10bps, 5000, 1000, v => '$' + v.toLocaleString('en-US', {maximumFractionDigits: 0}));
-        setMicro('micro-imbalance', d.book_imbalance, 0.1, -0.1, v => (v >= 0 ? '+' : '') + v.toFixed(3));
+        // When the live hub is feeding spread/depth/imbalance/slippage in real time,
+        // don't clobber them with the slower DB values; only set trade_pressure /
+        // relative_volume here (and seed the rest if no live tick has arrived yet).
+        const liveActive = liveConfig.enabled && lastLiveSnap && lastLiveSnap.symbol === symbol;
+        if (!liveActive) {
+            setMicro('micro-spread', d.spread_bps, 3, 10, v => v.toFixed(1) + ' bps', true);
+            setMicro('micro-depth', d.depth_usd_10bps, 5000, 1000, v => '$' + v.toLocaleString('en-US', {maximumFractionDigits: 0}));
+            setMicro('micro-imbalance', d.book_imbalance, 0.1, -0.1, v => (v >= 0 ? '+' : '') + v.toFixed(3));
+            setMicro('micro-slippage', d.slippage_bps_est, 5, 20, v => v.toFixed(1) + ' bps', true);
+        }
         setMicro('micro-pressure', d.trade_pressure, 0.1, -0.1, v => (v >= 0 ? '+' : '') + v.toFixed(3));
         setMicro('micro-relvol', d.relative_volume, 1.5, 0.5, v => v.toFixed(1) + 'x');
-        setMicro('micro-slippage', d.slippage_bps_est, 5, 20, v => v.toFixed(1) + ' bps', true);
     } catch (e) { /* silent */ }
+}
+
+// ── Live source debug (🔬 Source): raw Binance vs cockpit ──
+function fmtNum(v, dp = 2) {
+    if (v == null || Number.isNaN(v)) return 'n/a';
+    return Number(v).toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp });
+}
+
+async function openLiveDebug() {
+    const modal = document.getElementById('live-debug-modal');
+    if (!modal) return;
+    modal.classList.remove('hidden');
+    // Use the latest streamed snapshot if we have one; else pull a one-off.
+    if (lastLiveSnap && lastLiveSnap.symbol === currentSymbol) {
+        renderLiveDebug(lastLiveSnap);
+    } else {
+        try {
+            const res = await fetch(`${API_URL}/binance/debug/${encodeURIComponent(currentSymbol)}`);
+            const snap = await res.json();
+            renderLiveDebug(snap);
+        } catch (e) { /* leave whatever is there */ }
+    }
+}
+
+function renderLiveDebug(snap) {
+    const summary = document.getElementById('live-debug-summary');
+    const rows = document.getElementById('live-debug-rows');
+    const formula = document.getElementById('ld-source-formula');
+    if (!summary || !rows) return;
+
+    if (!snap || snap.error || snap.displayed_price == null) {
+        summary.innerHTML = `<span class="ld-kv">No live Binance data for <b>${currentSymbol}</b>. ${snap && snap.error ? snap.error : ''}</span>`;
+        rows.innerHTML = '';
+        if (formula) formula.textContent = '—';
+        return;
+    }
+
+    const src = snap.price_source;
+    const formulas = {
+        trade: 'last @trade price (p)',
+        aggTrade: 'last @aggTrade price (p)',
+        ticker_last: '@ticker last price (c)',
+        book_mid: '(@bookTicker bid + ask) / 2',
+        kline_close: 'in-progress @kline close',
+    };
+    if (formula) formula.textContent = formulas[src] || src;
+
+    summary.innerHTML = `
+        <span class="ld-kv">source <b>${src}</b></span>
+        <span class="ld-kv">status <b>${snap.feed_status}</b></span>
+        <span class="ld-kv">latency <b>${fmtNum(snap.latency_ms, 0)} ms</b></span>
+        <span class="ld-kv">staleness <b>${fmtNum(snap.data_age_ms, 0)} ms</b></span>
+        <span class="ld-kv">event <b>${snap.event_time ? new Date(snap.event_time).toLocaleTimeString() : 'n/a'}</b></span>
+        <span class="ld-kv">recv <b>${snap.local_receive_time ? new Date(snap.local_receive_time).toLocaleTimeString() : 'n/a'}</b></span>
+    `;
+
+    const r = snap.raw || {};
+    const t = snap.ticker || {};
+    const m = snap.micro || {};
+    const defs = [
+        ['raw_trade_price', r.trade_price, 'trade'],
+        ['raw_agg_trade_price', r.agg_trade_price, 'aggTrade'],
+        ['raw_ticker_last (c)', r.ticker_last, 'ticker_last'],
+        ['raw_book_bid (b)', r.book_bid, null],
+        ['raw_book_ask (a)', r.book_ask, null],
+        ['book_mid', r.book_mid, 'book_mid'],
+        ['raw_kline_close', r.kline_close, 'kline_close'],
+        ['— displayed_price —', snap.displayed_price, '__displayed__'],
+        ['spread', m.spread, null],
+        ['spread_bps', m.spread_bps, null],
+        ['depth_usd_10bps', m.depth_usd_10bps, null],
+        ['imbalance', m.imbalance, null],
+        ['24h change %', t.price_change_pct, null],
+        ['24h high', t.high, null],
+        ['24h low', t.low, null],
+        ['24h vol (base)', t.volume_base, null],
+    ];
+    rows.innerHTML = defs.map(([label, val, key]) => {
+        const active = (key === src) || (key === '__displayed__');
+        const dp = (label.includes('%') || label.includes('imbalance') || label.includes('bps')) ? 3 : 2;
+        return `<tr class="${active ? 'ld-active' : ''}"><td>${label}</td><td>${fmtNum(val, dp)}</td></tr>`;
+    }).join('');
 }
 
 // ── Activity Feed ──────────────────────────
@@ -956,11 +1135,22 @@ function setupFrontendErrorReporter() {
 
 // ── Init ───────────────────────────────────
 
-document.addEventListener('DOMContentLoaded', () => {
+// ── Live source debug modal wiring ─────────
+(function setupLiveDebug() {
+    const btn = document.getElementById('live-debug-btn');
+    const close = document.getElementById('close-live-debug');
+    const modal = document.getElementById('live-debug-modal');
+    if (btn) btn.addEventListener('click', openLiveDebug);
+    if (close) close.addEventListener('click', () => modal.classList.add('hidden'));
+    if (modal) modal.addEventListener('click', e => { if (e.target === modal) modal.classList.add('hidden'); });
+})();
+
+document.addEventListener('DOMContentLoaded', async () => {
     setupLogging();
     setupOps();
     startFeedWatchdog();
     initChart();
+    await loadLiveConfig();   // know the price/candle source before loading the chart
     loadSymbols();
 
     // Periodic updates

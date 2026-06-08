@@ -933,3 +933,27 @@ select:hover, select:focus { border-color: var(--accent-color); }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+/* ── Binance live source: chart-header badge + raw-vs-cockpit debug ───────── */
+.chart-header-right { display: flex; align-items: center; gap: 0.6rem; }
+.source-badge {
+    font-size: 0.65rem; font-weight: 600; letter-spacing: 0.02em;
+    padding: 3px 7px; border-radius: 6px; text-transform: uppercase;
+    background: rgba(0, 229, 255, 0.10); color: var(--accent-color);
+    border: 1px solid rgba(0, 229, 255, 0.25); font-variant-numeric: tabular-nums;
+}
+.source-badge.derived { background: rgba(255,167,38,0.12); color: var(--warn-color); border-color: rgba(255,167,38,0.3); }
+.source-badge.off { background: rgba(139,148,165,0.1); color: var(--text-muted); border-color: rgba(139,148,165,0.2); }
+
+.status-badge.mock { background: rgba(206, 147, 216, 0.15); color: #CE93D8; border: 1px solid rgba(206, 147, 216, 0.35); }
+
+.live-debug-summary { display: flex; flex-wrap: wrap; gap: 0.5rem 1.2rem; margin-bottom: 0.8rem; font-size: 0.8rem; }
+.live-debug-summary .ld-kv { color: var(--text-muted); }
+.live-debug-summary .ld-kv b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.live-debug-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+.live-debug-table td { padding: 4px 8px; border-bottom: 1px solid rgba(255,255,255,0.05); }
+.live-debug-table td:first-child { color: var(--text-muted); white-space: nowrap; }
+.live-debug-table td:last-child { text-align: right; color: var(--text-primary); }
+.live-debug-table tr.ld-active td { color: var(--accent-color); font-weight: 600; }
+.live-debug-table tr.ld-active td:first-child { color: var(--accent-color); }
+.live-debug-hint { margin-top: 0.8rem; font-size: 0.72rem; color: var(--text-muted); line-height: 1.5; }
+.live-debug-hint code, .ld-formula { background: rgba(255,255,255,0.05); padding: 1px 5px; border-radius: 4px; color: var(--text-primary); }

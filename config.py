@@ -22,6 +22,27 @@ class Settings(BaseSettings):
         description="List of canonical symbols to subscribe to"
     )
     
+    # ── Binance Spot live layer (in-process hub feeding the cockpit) ──────────
+    # The cockpit's *displayed* price comes from this real-time hub, NOT from the
+    # DB→aggregator→ohlcv_1s path (which lags several seconds and mixes exchanges).
+    # The hub is Binance SPOT only by default; it never touches futures unless a
+    # caller explicitly overrides BINANCE_WS_BASE / BINANCE_REST_BASE.
+    ENABLE_BINANCE_SPOT: bool = Field(default=True, description="Run the in-process Binance Spot live hub (real-time price/microstructure for the cockpit)")
+    # Which raw Binance value becomes the cockpit's displayed price:
+    #   trade        → last raw trade price  (p of <symbol>@trade)        [freshest]
+    #   aggTrade     → last aggregated trade price (p of <symbol>@aggTrade)
+    #   ticker_last  → c of <symbol>@ticker (aligns with Binance 24h header)
+    #   book_mid     → (best_bid + best_ask) / 2 from <symbol>@bookTicker
+    #   kline_close  → close of the in-progress <symbol>@kline_<interval>
+    PRICE_SOURCE: str = Field(default="trade", description="Source of the displayed price: trade|aggTrade|ticker_last|book_mid|kline_close")
+    # Chart candles: real Binance klines (matches Binance UI) vs derived 1s OHLCV.
+    CANDLE_SOURCE: str = Field(default="binance_kline", description="Chart candle source: binance_kline|derived_trades")
+    CANDLE_INTERVAL: str = Field(default="1m", description="Binance kline interval for the chart: 1s|1m|5m|15m|1h|4h|1d")
+    BINANCE_WS_BASE: str = Field(default="wss://stream.binance.com:9443", description="Binance Spot combined-stream WS base (NOT fstream/futures)")
+    BINANCE_REST_BASE: str = Field(default="https://api.binance.com", description="Binance Spot REST base for klines/depth/ticker snapshots")
+    BINANCE_DEPTH_LIMIT: int = Field(default=100, description="REST order-book snapshot depth (5|10|20|50|100|500|1000)")
+    BINANCE_LIVE_MAX_AGE_MS: int = Field(default=3000, description="Displayed price counts as LIVE only if a real Binance event arrived within this window (ms); older → STALE")
+
     # Feature Flags
     ENABLE_L2_BOOK: bool = Field(default=False, description="Whether to ingest level 2 full order book (Warning: high volume)")
     ENABLE_COINGECKO: bool = Field(default=False, description="Whether to run CoinGecko enrichment worker")

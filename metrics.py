@@ -62,6 +62,24 @@ market_ingest_lag_ms = Histogram(
     buckets=(5, 25, 50, 100, 250, 500, 1000, 5000),
 )
 
+# ── Binance Spot live hub (in-process, cockpit display) ──────────
+binance_live_connected = Gauge(
+    "binance_live_connected", "Binance Spot live-hub WS connection state (1=up, 0=down)"
+)
+binance_live_events_total = Counter(
+    "binance_live_events_total", "Raw Binance Spot stream events processed by the live hub", ["stream"]
+)
+binance_live_staleness_ms = Gauge(
+    "binance_live_staleness_ms", "Age (ms) of the displayed price per symbol in the live hub", ["symbol"]
+)
+binance_live_latency_ms = Histogram(
+    "binance_live_latency_ms", "Binance event-time → local-receive latency (ms)",
+    buckets=(5, 10, 25, 50, 100, 250, 500, 1000, 5000),
+)
+binance_book_resync_total = Counter(
+    "binance_book_resync_total", "Order-book resyncs (gap detected in depth update IDs)", ["symbol"]
+)
+
 # ── Storage / writer ─────────────────────────
 db_write_latency_ms = Histogram(
     "db_write_latency_ms", "Batch DB write latency (ms)",

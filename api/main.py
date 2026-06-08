@@ -12,17 +12,39 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import settings
 from paper_execution.engine import PaperExecutionEngine
+from market.binance_spot import BinanceSpotHub
 
 # Global DB pool
 pool = None
 execution_engine = None
+binance_hub: BinanceSpotHub | None = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global pool, execution_engine
+    global pool, execution_engine, binance_hub
     pool = await asyncpg.create_pool(settings.DATABASE_URL)
     execution_engine = PaperExecutionEngine(pool)
+
+    # Real-time Binance Spot hub feeding the cockpit's displayed price/microstructure.
+    # In-process so the price matches Binance UI within network latency (the DB→
+    # aggregator→ohlcv_1s path lags several seconds and mixes exchanges).
+    if settings.ENABLE_BINANCE_SPOT:
+        symbols = settings.ACTIVE_SYMBOLS
+        binance_hub = BinanceSpotHub(
+            symbols=symbols,
+            price_source=settings.PRICE_SOURCE,
+            candle_interval=settings.CANDLE_INTERVAL,
+            ws_base=settings.BINANCE_WS_BASE,
+            rest_base=settings.BINANCE_REST_BASE,
+            depth_limit=settings.BINANCE_DEPTH_LIMIT,
+            max_age_ms=settings.BINANCE_LIVE_MAX_AGE_MS,
+        )
+        await binance_hub.start()
+
     yield
+
+    if binance_hub:
+        await binance_hub.stop()
     await pool.close()
 
 app = FastAPI(lifespan=lifespan, title="Antigravity Cockpit API")
@@ -111,17 +133,25 @@ async def get_watchlist():
                     LIMIT 1
                 """, symbol)
 
-                # Latest price
-                price_row = await conn.fetchrow("""
-                    SELECT close FROM ohlcv_1s
-                    WHERE symbol = $1
-                    ORDER BY bucket_start DESC
-                    LIMIT 1
-                """, symbol)
+                # Latest price — prefer the real-time Binance hub so the watchlist
+                # matches the big displayed number; fall back to Binance-pinned OHLCV.
+                price = None
+                if binance_hub and binance_hub.has_symbol(symbol):
+                    snap = binance_hub.snapshot(symbol)
+                    if snap:
+                        price = snap.get("displayed_price")
+                if price is None:
+                    price_row = await conn.fetchrow("""
+                        SELECT close FROM ohlcv_1s
+                        WHERE symbol = $1 AND exchange_code = 'binance'
+                        ORDER BY bucket_start DESC
+                        LIMIT 1
+                    """, symbol)
+                    price = float(price_row['close']) if price_row else None
 
                 results.append({
                     "symbol": symbol,
-                    "price": float(price_row['close']) if price_row else None,
+                    "price": price,
                     "s_social": float(sig['s_social']) if sig else 0.0,
                     "s_market": float(sig['s_market']) if sig else 0.0,
                     "s_risk": float(sig['s_risk']) if sig else 0.5,
@@ -501,7 +531,7 @@ async def get_health():
                 SELECT DISTINCT ON (symbol) symbol, bucket_start,
                        EXTRACT(EPOCH FROM (now() - bucket_start)) * 1000 AS age_ms
                 FROM ohlcv_1s
-                WHERE symbol = ANY($1::text[])
+                WHERE symbol = ANY($1::text[]) AND exchange_code = 'binance'
                 ORDER BY symbol, bucket_start DESC
             """, settings.ACTIVE_SYMBOLS)
             seen = {r['symbol']: r for r in rows}
@@ -520,11 +550,15 @@ async def get_health():
     any_fresh = any(s["status"] == "fresh" for s in symbols)
     # Honest social-source state — never imply a real feed when there is none.
     social_source = "mock-only" if settings.ENABLE_MOCK_SOCIAL else "not_configured"
+    # Real-time Binance Spot hub status (display path), kept distinct from the
+    # DB/aggregator freshness above (persistence path).
+    binance_live = binance_hub.status() if binance_hub else {"enabled": settings.ENABLE_BINANCE_SPOT, "connected": False}
     return {
         "status": "ok" if (db_status == "up" and any_fresh) else "degraded",
         "db_status": db_status,
         "max_data_age_ms": max_age_ms,
         "social_source": social_source,
+        "binance_live": binance_live,
         "symbols": symbols,
     }
 
@@ -666,15 +700,59 @@ async def get_recent_trades(limit: int = 50):
     except Exception as e:
         return {"error": str(e)}
 
+# ── Binance Spot live layer (real-time hub) ─
+
+@app.get("/api/binance/config")
+async def get_binance_config():
+    """Live-layer config the cockpit needs to pick its price/candle source."""
+    return {
+        "enabled": bool(settings.ENABLE_BINANCE_SPOT and binance_hub is not None),
+        "price_source": settings.PRICE_SOURCE,
+        "candle_source": settings.CANDLE_SOURCE,
+        "candle_interval": settings.CANDLE_INTERVAL,
+        "max_age_ms": settings.BINANCE_LIVE_MAX_AGE_MS,
+        "symbols": settings.ACTIVE_SYMBOLS,
+        "connected": bool(binance_hub.connected) if binance_hub else False,
+    }
+
+
+@app.get("/api/binance/debug/{symbol:path}")
+async def get_binance_debug(symbol: str):
+    """
+    Raw Binance values vs the cockpit's displayed value, side by side, so a
+    Binance-UI / cockpit mismatch is immediately explainable (which stream,
+    which source, event time, local receive, latency, staleness).
+    """
+    if not binance_hub or not binance_hub.has_symbol(symbol):
+        return {"error": "binance_spot hub not running for this symbol",
+                "enabled": bool(settings.ENABLE_BINANCE_SPOT)}
+    snap = binance_hub.snapshot(symbol)
+    if snap is None:
+        return {"error": "no live data"}
+    return snap
+
+
+@app.get("/api/binance/klines/{symbol:path}")
+async def get_binance_klines(symbol: str):
+    """Real Binance Spot klines for the chart (matches Binance UI at the configured interval)."""
+    if not binance_hub or not binance_hub.has_symbol(symbol):
+        return []
+    return {"interval": settings.CANDLE_INTERVAL, "candles": binance_hub.klines(symbol)}
+
+
 # ── Historical OHLCV ───────────────────────
 
 @app.get("/api/historical/{symbol:path}")
 async def get_historical(symbol: str, limit: int = 1800):
+    # Pin to Binance: ohlcv_1s holds buckets for binance/kraken/coinbase, and an
+    # unfiltered "latest bucket" could silently return a different exchange/market
+    # (e.g. Coinbase BTC-USD ≠ Binance BTC/USDT). This is a real source of the
+    # cockpit-vs-Binance gap.
     async with pool.acquire() as conn:
         records = await conn.fetch("""
             SELECT bucket_start, open, high, low, close, volume_base
             FROM ohlcv_1s
-            WHERE symbol = $1
+            WHERE symbol = $1 AND exchange_code = 'binance'
             ORDER BY bucket_start DESC
             LIMIT $2
         """, symbol, limit)
@@ -696,16 +774,45 @@ async def get_historical(symbol: str, limit: int = 1800):
 @app.websocket("/ws/live/{symbol:path}")
 async def websocket_endpoint(websocket: WebSocket, symbol: str):
     await websocket.accept()
-    last_candle_time = None
+
+    # Preferred path: the in-process Binance Spot hub (real-time, source-pinned,
+    # sub-second). Falls back to the DB OHLCV path only when the hub is disabled
+    # or has no data for this symbol.
+    use_hub = bool(binance_hub and binance_hub.has_symbol(symbol))
 
     try:
         while True:
+            if use_hub:
+                snap = binance_hub.snapshot(symbol)
+                if snap and snap.get("displayed_price") is not None:
+                    payload = {
+                        "type": "live",
+                        # backward-compatible candle block for the chart
+                        "data": snap.get("candle"),
+                        "data_age_ms": snap.get("data_age_ms"),
+                        "stale": snap.get("feed_status") == "stale",
+                        **snap,  # symbol, source, price_source, displayed_price,
+                                 # feed_status, latency_ms, event_time, raw, ticker, micro, candle
+                    }
+                    await websocket.send_text(json.dumps(payload))
+                else:
+                    # Hub running but no Binance event yet (e.g. just connected or
+                    # geo-blocked). Honest "no data" — never a fabricated price.
+                    await websocket.send_text(json.dumps({
+                        "type": "nodata", "symbol": symbol, "source": "binance_spot",
+                        "reason": "no_binance_event_yet",
+                        "connected": bool(binance_hub.connected),
+                    }))
+                await asyncio.sleep(0.5)
+                continue
+
+            # ── Fallback: DB-derived OHLCV (pinned to Binance) ──
             async with pool.acquire() as conn:
                 record = await conn.fetchrow("""
                     SELECT bucket_start, open, high, low, close, volume_base,
                            EXTRACT(EPOCH FROM (now() - bucket_start)) * 1000 AS age_ms
                     FROM ohlcv_1s
-                    WHERE symbol = $1
+                    WHERE symbol = $1 AND exchange_code = 'binance'
                     ORDER BY bucket_start DESC
                     LIMIT 1
                 """, symbol)
@@ -714,8 +821,7 @@ async def websocket_endpoint(websocket: WebSocket, symbol: str):
                     age_ms = float(record['age_ms']) if record['age_ms'] is not None else None
                     candle_data = {
                         "type": "candle",
-                        # Freshness so the UI can drop the LIVE badge and flag STALE
-                        # when the latest candle stops advancing.
+                        "source": "ohlcv_derived",
                         "data_age_ms": age_ms,
                         "stale": age_ms is not None and age_ms > settings.MAX_DATA_AGE_S * 1000,
                         "data": {
@@ -728,14 +834,9 @@ async def websocket_endpoint(websocket: WebSocket, symbol: str):
                         }
                     }
                     await websocket.send_text(json.dumps(candle_data))
-                    last_candle_time = record['bucket_start']
                 else:
-                    # No OHLCV at all for this symbol — tell the UI explicitly so
-                    # it shows "No data" instead of a misleading LIVE badge.
                     await websocket.send_text(json.dumps({
-                        "type": "nodata",
-                        "symbol": symbol,
-                        "reason": "no_ohlcv",
+                        "type": "nodata", "symbol": symbol, "reason": "no_ohlcv",
                     }))
 
             await asyncio.sleep(1)

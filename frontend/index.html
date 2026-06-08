@@ -24,6 +24,7 @@
             <div class="controls">
                 <button id="ops-btn" class="log-btn">🖥 Ops</button>
                 <button id="logs-btn" class="log-btn">📋 Logs</button>
+                <button id="live-debug-btn" class="log-btn" title="Compare raw Binance values vs the cockpit's displayed value">🔬 Source</button>
                 <label for="symbol-select">Market:</label>
                 <select id="symbol-select"></select>
                 <span id="ops-status" class="status-badge disconnected" title="Ops supervisor status">Ops ?</span>
@@ -90,7 +91,10 @@
                 <div class="chart-wrapper">
                     <div class="chart-header">
                         <h2 id="current-symbol">Select a symbol</h2>
-                        <div class="current-price" id="current-price">--</div>
+                        <div class="chart-header-right">
+                            <span id="chart-source-badge" class="source-badge" title="Displayed price source · chart interval">—</span>
+                            <div class="current-price" id="current-price">--</div>
+                        </div>
                     </div>
                     <div id="tvchart" class="chart-container"></div>
                 </div>
@@ -205,6 +209,27 @@
                         </div>
                     </div>
                     <div id="ops-logs" class="ops-logs"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- LIVE SOURCE DEBUG MODAL -->
+    <div id="live-debug-modal" class="modal hidden">
+        <div class="modal-content logs-content">
+            <div class="modal-header">
+                <h2>Binance raw vs Cockpit</h2>
+                <button id="close-live-debug" class="close-btn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="live-debug-summary" class="live-debug-summary"></div>
+                <table class="live-debug-table">
+                    <tbody id="live-debug-rows"></tbody>
+                </table>
+                <div class="live-debug-hint">
+                    Displayed price = <code id="ld-source-formula">—</code>.
+                    Switch the source with <code>PRICE_SOURCE</code> in <code>.env</code>
+                    (<code>trade</code> = freshest, <code>ticker_last</code> = aligns with Binance 24h header).
                 </div>
             </div>
         </div>
