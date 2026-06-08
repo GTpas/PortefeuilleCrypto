@@ -12,40 +12,78 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import settings
 from paper_execution.engine import PaperExecutionEngine
-from market.binance_spot import BinanceSpotHub
+from market.binance_spot import (
+    BinanceSpotHub, normalize_range, range_to_interval, CHART_RANGES,
+)
+from market.universe import BinanceUniverseHub
 
 # Global DB pool
 pool = None
 execution_engine = None
 binance_hub: BinanceSpotHub | None = None
+universe_hub: BinanceUniverseHub | None = None
+
+
+def _range_intervals() -> dict:
+    """Range→interval map from settings (1D/7D/1M/1Y)."""
+    return {
+        "1D": settings.CHART_INTERVAL_1D,
+        "7D": settings.CHART_INTERVAL_7D,
+        "1M": settings.CHART_INTERVAL_1M,
+        "1Y": settings.CHART_INTERVAL_1Y,
+    }
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global pool, execution_engine, binance_hub
+    global pool, execution_engine, binance_hub, universe_hub
     pool = await asyncpg.create_pool(settings.DATABASE_URL)
     execution_engine = PaperExecutionEngine(pool)
 
     # Real-time Binance Spot hub feeding the cockpit's displayed price/microstructure.
     # In-process so the price matches Binance UI within network latency (the DB→
     # aggregator→ohlcv_1s path lags several seconds and mixes exchanges).
+    # Tier 3 (full detail): the small ACTIVE_SYMBOLS core + the selected symbol.
     if settings.ENABLE_BINANCE_SPOT:
-        symbols = settings.ACTIVE_SYMBOLS
+        # Default range governs the initial chart interval.
+        initial_interval = range_to_interval(settings.CHART_RANGE_DEFAULT, _range_intervals())
         binance_hub = BinanceSpotHub(
-            symbols=symbols,
+            symbols=settings.ACTIVE_SYMBOLS,
             price_source=settings.PRICE_SOURCE,
-            candle_interval=settings.CANDLE_INTERVAL,
+            candle_interval=initial_interval or settings.CANDLE_INTERVAL,
             ws_base=settings.BINANCE_WS_BASE,
             rest_base=settings.BINANCE_REST_BASE,
             depth_limit=settings.BINANCE_DEPTH_LIMIT,
             max_age_ms=settings.BINANCE_LIVE_MAX_AGE_MS,
             chart_max_age_ms=settings.CHART_LIVE_MAX_AGE_MS,
+            max_candles=settings.MAX_CANDLES_BACKEND,
+            active_symbol_limit=settings.BACKEND_ACTIVE_SYMBOL_LIMIT,
+            range_intervals=_range_intervals(),
         )
         await binance_hub.start()
+
+    # Tier 1 (light): top-N trending Binance Spot pairs, display-only.
+    if settings.ENABLE_MARKET_UNIVERSE:
+        universe_hub = BinanceUniverseHub(
+            quote_asset=settings.QUOTE_ASSET,
+            limit=settings.UNIVERSE_LIMIT,
+            min_quote_volume=settings.MIN_QUOTE_VOLUME,
+            exclude_stables=settings.EXCLUDE_STABLES,
+            exclude_leverage=settings.EXCLUDE_LEVERAGE,
+            refresh_seconds=settings.TRENDING_REFRESH_SECONDS,
+            ws_base=settings.BINANCE_WS_BASE,
+            rest_base=settings.BINANCE_REST_BASE,
+            max_symbols=settings.BACKEND_MAX_SYMBOLS,
+            stale_ms=settings.UNIVERSE_STALE_MS,
+        )
+        await universe_hub.start()
 
     yield
 
     if binance_hub:
         await binance_hub.stop()
+    if universe_hub:
+        await universe_hub.stop()
     await pool.close()
 
 app = FastAPI(lifespan=lifespan, title="Antigravity Cockpit API")
@@ -216,11 +254,13 @@ async def get_signal_history(symbol: str, limit: int = 50):
     try:
         async with pool.acquire() as conn:
             records = await conn.fetch("""
-                SELECT id, ts_eval, s_social, s_market, s_risk, s_total,
-                       action_proposed, confidence_score, reason_code, quality_grade
-                FROM decision_snapshot
-                WHERE symbol = $1
-                ORDER BY ts_eval DESC
+                SELECT ds.id, ds.ts_eval, ds.s_social, ds.s_market, ds.s_risk, ds.s_total,
+                       ds.action_proposed, ds.confidence_score, ds.reason_code, ds.quality_grade,
+                       COALESCE(sqa.has_sufficient_social, FALSE) AS social_available
+                FROM decision_snapshot ds
+                LEFT JOIN signal_quality_audit sqa ON sqa.decision_snapshot_id = ds.id
+                WHERE ds.symbol = $1
+                ORDER BY ds.ts_eval DESC
                 LIMIT $2
             """, symbol, limit)
 
@@ -236,6 +276,8 @@ async def get_signal_history(symbol: str, limit: int = 50):
                     "confidence_score": float(r['confidence_score']) if r['confidence_score'] else None,
                     "reason_code": r.get('reason_code'),
                     "quality_grade": r.get('quality_grade'),
+                    # So the timeline can gate the SOC badge like the watchlist/drilldown.
+                    "social_available": bool(r['social_available']),
                 }
                 for r in records
             ]
@@ -554,12 +596,14 @@ async def get_health():
     # Real-time Binance Spot hub status (display path), kept distinct from the
     # DB/aggregator freshness above (persistence path).
     binance_live = binance_hub.status() if binance_hub else {"enabled": settings.ENABLE_BINANCE_SPOT, "connected": False}
+    universe_status = universe_hub.status() if universe_hub else {"enabled": settings.ENABLE_MARKET_UNIVERSE, "connected": False, "count": 0}
     return {
         "status": "ok" if (db_status == "up" and any_fresh) else "degraded",
         "db_status": db_status,
         "max_data_age_ms": max_age_ms,
         "social_source": social_source,
         "binance_live": binance_live,
+        "universe": universe_status,
         "symbols": symbols,
     }
 
@@ -705,16 +749,149 @@ async def get_recent_trades(limit: int = 50):
 
 @app.get("/api/binance/config")
 async def get_binance_config():
-    """Live-layer config the cockpit needs to pick its price/candle source."""
+    """Live-layer config the cockpit needs to pick its price/candle source,
+    chart ranges, and the memory bounds it should enforce client-side."""
+    # The hub's interval changes with the selected range; report the live value.
+    current_interval = binance_hub.candle_interval if binance_hub else settings.CANDLE_INTERVAL
+    active_symbol = binance_hub.active_symbol if binance_hub else (
+        settings.ACTIVE_SYMBOLS[0] if settings.ACTIVE_SYMBOLS else None)
     return {
         "enabled": bool(settings.ENABLE_BINANCE_SPOT and binance_hub is not None),
         "price_source": settings.PRICE_SOURCE,
         "candle_source": settings.CANDLE_SOURCE,
-        "candle_interval": settings.CANDLE_INTERVAL,
+        "candle_interval": current_interval,
+        "active_symbol": active_symbol,
         "max_age_ms": settings.BINANCE_LIVE_MAX_AGE_MS,
         "chart_live_max_age_ms": settings.CHART_LIVE_MAX_AGE_MS,
         "symbols": settings.ACTIVE_SYMBOLS,
         "connected": bool(binance_hub.connected) if binance_hub else False,
+        # Chart ranges (1D/7D/1M/1Y) → interval mapping + default range.
+        "chart_ranges": list(CHART_RANGES),
+        "range_default": normalize_range(settings.CHART_RANGE_DEFAULT),
+        "range_intervals": _range_intervals(),
+        # Universe (Tier 1) availability.
+        "universe_enabled": bool(settings.ENABLE_MARKET_UNIVERSE and universe_hub is not None),
+        "universe_limit": settings.UNIVERSE_LIMIT,
+        # Frontend memory bounds (the cockpit enforces these client-side).
+        "frontend_limits": {
+            "max_candles_per_symbol": settings.MAX_CANDLES_PER_SYMBOL,
+            "max_visible_symbols": settings.MAX_VISIBLE_SYMBOLS,
+            "max_event_buffer": settings.MAX_EVENT_BUFFER,
+            "max_log_buffer": settings.MAX_LOG_BUFFER,
+            "ui_update_throttle_ms": settings.UI_UPDATE_THROTTLE_MS,
+            "snapshot_interval_ms": int(settings.SNAPSHOT_INTERVAL_SECONDS * 1000),
+        },
+    }
+
+
+# ── Market universe (Tier 1: top trending, light) ───────────────────────────
+
+@app.get("/api/market/universe")
+async def get_market_universe(limit: int = 300):
+    """Ranked top-trending Binance Spot pairs (light rows). Real data only —
+    empty list + honest status if the universe hub is disabled / has no data."""
+    if not universe_hub:
+        return {"enabled": False, "connected": False, "count": 0, "rows": [],
+                "reason": "universe_disabled"}
+    limit = max(1, min(limit, settings.UNIVERSE_LIMIT))
+    rows = universe_hub.universe(limit)
+    st = universe_hub.status()
+    # Tag which rows are also full-detail / bot-traded core symbols.
+    core = set(settings.ACTIVE_SYMBOLS)
+    for r in rows:
+        r["is_core"] = r["symbol"] in core
+    return {"enabled": True, "connected": st["connected"], "count": len(rows),
+            "limit": limit, "last_refresh_ms": st["last_refresh_ms"],
+            "source": "binance_spot", "rows": rows}
+
+
+@app.get("/api/market/trending")
+async def get_market_trending(limit: int = 300):
+    """Alias of /api/market/universe (already ranked by trending score)."""
+    return await get_market_universe(limit=limit)
+
+
+@app.get("/api/market/source")
+async def get_market_source():
+    """What is real vs mock vs not-configured — so the cockpit never mislabels data."""
+    return {
+        "price": {
+            "source": "binance_spot" if (binance_hub and binance_hub.connected) else "unavailable",
+            "real": bool(binance_hub and binance_hub.connected),
+            "price_source": settings.PRICE_SOURCE,
+        },
+        "chart": {
+            "source": settings.CANDLE_SOURCE,
+            "interval": binance_hub.candle_interval if binance_hub else settings.CANDLE_INTERVAL,
+            "real": bool(binance_hub and binance_hub.connected),
+        },
+        "universe": {
+            "source": "binance_spot" if (universe_hub and universe_hub.connected) else "unavailable",
+            "real": bool(universe_hub and universe_hub.connected),
+            "count": len(universe_hub.universe()) if universe_hub else 0,
+        },
+        "social": {
+            # Honest: mock-only today, gated off by default. Never presented as real.
+            "source": "mock" if settings.ENABLE_MOCK_SOCIAL else "not_configured",
+            "real": False,
+        },
+    }
+
+
+@app.get("/api/market/symbol/{symbol:path}/snapshot")
+async def get_market_symbol_snapshot(symbol: str):
+    """
+    Full-detail snapshot if the symbol is in the Tier-3 hub; otherwise the light
+    universe row. Honest 'unavailable' when neither has data.
+    """
+    if binance_hub and binance_hub.has_symbol(symbol):
+        snap = binance_hub.snapshot(symbol)
+        if snap:
+            return {"tier": "full", **snap}
+    if universe_hub:
+        row = universe_hub.get(symbol)
+        if row:
+            return {"tier": "light", **row}
+    return {"error": "unavailable", "symbol": symbol}
+
+
+@app.get("/api/market/symbol/{symbol:path}/klines")
+async def get_market_symbol_klines(symbol: str, range: str = None):
+    """Real Binance Spot klines for a chart range (1D/7D/1M/1Y, incl. 1J/7J/1An)."""
+    rng = normalize_range(range or settings.CHART_RANGE_DEFAULT)
+    if not binance_hub:
+        # Fall back to a direct REST helper so ranges still work without the hub.
+        from market.binance_spot import range_to_interval as _r2i, klines_limit_for_range as _lim
+        interval = _r2i(rng, _range_intervals())
+        return {"symbol": symbol, "range": rng, "interval": interval, "candles": [],
+                "source": "binance_kline", "reason": "hub_disabled"}
+    return await binance_hub.fetch_klines_range(symbol, rng)
+
+
+@app.post("/api/market/active-symbol")
+async def post_active_symbol(body: dict):
+    """
+    Select the full-detail (Tier 3) symbol for the chart, optionally with a range.
+    Returns the fresh REST klines for that range so the frontend can rebase the
+    chart cleanly, plus the live config.
+    """
+    symbol = (body or {}).get("symbol")
+    rng = normalize_range((body or {}).get("range") or settings.CHART_RANGE_DEFAULT)
+    if not symbol:
+        return {"ok": False, "error": "missing 'symbol'"}
+    if not binance_hub:
+        return {"ok": False, "error": "binance_spot hub disabled", "symbol": symbol}
+    # Apply symbol + range together → a SINGLE reconnect (not two back-to-back).
+    res = await binance_hub.set_active_and_range(symbol, rng)
+    klines = await binance_hub.fetch_klines_range(symbol, rng)
+    return {
+        "ok": True,
+        "symbol": symbol,
+        "range": rng,
+        "interval": binance_hub.candle_interval,
+        "reconnect": res.get("reconnect", False),
+        "tracked": res.get("tracked", []),
+        "klines": klines,
     }
 
 
@@ -739,7 +916,9 @@ async def get_binance_klines(symbol: str):
     """Real Binance Spot klines for the chart (matches Binance UI at the configured interval)."""
     if not binance_hub or not binance_hub.has_symbol(symbol):
         return []
-    return {"interval": settings.CANDLE_INTERVAL, "candles": binance_hub.klines(symbol)}
+    # Report the hub's LIVE interval (changes with the selected range), not the
+    # static default — otherwise range-switched candles would be mislabeled.
+    return {"interval": binance_hub.candle_interval, "candles": binance_hub.klines(symbol)}
 
 
 # ── Historical OHLCV ───────────────────────
@@ -777,13 +956,25 @@ async def get_historical(symbol: str, limit: int = 1800):
 async def websocket_endpoint(websocket: WebSocket, symbol: str):
     await websocket.accept()
 
+    # Throttle: minimum interval between snapshots pushed to this client. Bounds
+    # bandwidth/CPU when many tabs/symbols are open (memory-optimization pass).
+    throttle_s = max(0.1, settings.BROADCAST_THROTTLE_MS / 1000.0)
+
     # Preferred path: the in-process Binance Spot hub (real-time, source-pinned,
-    # sub-second). Falls back to the DB OHLCV path only when the hub is disabled
-    # or has no data for this symbol.
-    use_hub = bool(binance_hub and binance_hub.has_symbol(symbol))
+    # sub-second). If the symbol isn't yet in the hub (the user selected a symbol
+    # outside the core set), promote it so it gets full-detail streams.
+    if binance_hub and not binance_hub.has_symbol(symbol):
+        try:
+            await binance_hub.set_active_symbol(symbol)
+        except Exception:
+            pass
 
     try:
         while True:
+            # Re-evaluated each tick: if this symbol is evicted from the Tier-3 hub
+            # (another selection hit the limit), cleanly degrade to the DB OHLCV
+            # fallback instead of streaming 'nodata' forever.
+            use_hub = bool(binance_hub and binance_hub.has_symbol(symbol))
             if use_hub:
                 snap = binance_hub.snapshot(symbol)
                 if snap and snap.get("displayed_price") is not None:
@@ -805,7 +996,7 @@ async def websocket_endpoint(websocket: WebSocket, symbol: str):
                         "reason": "no_binance_event_yet",
                         "connected": bool(binance_hub.connected),
                     }))
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(throttle_s)
                 continue
 
             # ── Fallback: DB-derived OHLCV (pinned to Binance) ──
@@ -847,7 +1038,7 @@ async def websocket_endpoint(websocket: WebSocket, symbol: str):
                         "type": "nodata", "symbol": symbol, "reason": "no_ohlcv",
                     }))
 
-            await asyncio.sleep(1)
+            await asyncio.sleep(max(1.0, throttle_s))
 
     except WebSocketDisconnect:
         pass

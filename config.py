@@ -47,6 +47,42 @@ class Settings(BaseSettings):
     # than the price freshness window above. Older → CHART STALE; never received → NO CANDLES.
     CHART_LIVE_MAX_AGE_MS: int = Field(default=6000, description="Chart (kline) freshness window (ms): CHART LIVE if a kline arrived within it, else CHART STALE")
 
+    # ── Market universe (Tier 1: ≤300 trending symbols, light) ────────────────
+    # Display-only light tier. ONE Binance Spot all-market !ticker@arr stream feeds
+    # an in-memory, bounded ranking — it never opens 300×(trade/kline/depth) streams.
+    # Separate from ACTIVE_SYMBOLS (the small bot-traded / persisted core).
+    ENABLE_MARKET_UNIVERSE: bool = Field(default=True, description="Run the in-process light universe hub (top trending Binance Spot pairs, display-only)")
+    UNIVERSE_LIMIT: int = Field(default=300, description="Max number of trending symbols kept in the universe (hard cap)")
+    QUOTE_ASSET: str = Field(default="USDT", description="Quote asset for the universe (e.g. USDT). Only <BASE>/<QUOTE> spot pairs are considered")
+    MIN_QUOTE_VOLUME: float = Field(default=5_000_000.0, description="Minimum 24h quote volume for a pair to enter the universe (liquidity/activity floor)")
+    EXCLUDE_STABLES: bool = Field(default=True, description="Exclude pure stablecoin/fiat bases (USDC, FDUSD, EUR…) from the universe")
+    EXCLUDE_LEVERAGE: bool = Field(default=True, description="Exclude leverage tokens (UP/DOWN/BULL/BEAR, 3L/3S…) from the universe")
+    TRENDING_REFRESH_SECONDS: int = Field(default=60, description="How often the universe ranking is recomputed from the live ticker state")
+    UNIVERSE_STALE_MS: int = Field(default=15000, description="A universe row is flagged stale if its last ticker is older than this (ms)")
+
+    # ── Backend memory bounds (Tier separation: light universe vs heavy selected) ──
+    BACKEND_MAX_SYMBOLS: int = Field(default=300, description="Hard cap on symbols retained in the universe state (memory bound)")
+    BACKEND_ACTIVE_SYMBOL_LIMIT: int = Field(default=20, description="Max symbols allowed in the full-detail (Tier 3) Binance Spot hub at once")
+    MAX_CANDLES_BACKEND: int = Field(default=1500, description="Max klines retained per symbol in the Binance Spot hub cache")
+    MAX_MARKET_EVENTS: int = Field(default=50000, description="Bounded size of the ingestor's in-memory trade/bbo queues (events dropped with a warning when full — back-pressure bound)")
+    BROADCAST_THROTTLE_MS: int = Field(default=500, description="Minimum interval between /ws/live snapshots pushed to a client (ms)")
+    SNAPSHOT_INTERVAL_SECONDS: float = Field(default=3.0, description="Interval between universe snapshots served to the cockpit (light tier)")
+    ENABLE_DEPTH_ONLY_FOR_SELECTED: bool = Field(default=True, description="Only maintain the full L2 order book for full-detail (Tier 3) symbols, never the universe")
+
+    # ── Chart ranges (1D / 7D / 1M / 1Y) → Binance kline interval mapping ──────
+    CHART_RANGE_DEFAULT: str = Field(default="1D", description="Default chart range on load: 1D|7D|1M|1Y")
+    CHART_INTERVAL_1D: str = Field(default="1m", description="Kline interval for the 1D (1J) range")
+    CHART_INTERVAL_7D: str = Field(default="15m", description="Kline interval for the 7D (7J) range")
+    CHART_INTERVAL_1M: str = Field(default="1h", description="Kline interval for the 1M (1 month) range")
+    CHART_INTERVAL_1Y: str = Field(default="1d", description="Kline interval for the 1Y (1 year) range")
+
+    # ── Frontend memory bounds (served to the cockpit via /api/binance/config) ──
+    MAX_CANDLES_PER_SYMBOL: int = Field(default=1500, description="Max candles the chart keeps per symbol (older ones trimmed)")
+    MAX_VISIBLE_SYMBOLS: int = Field(default=60, description="Max watchlist rows rendered to the DOM at once (windowed/virtualized list)")
+    MAX_EVENT_BUFFER: int = Field(default=200, description="Max activity/decision feed items kept in the frontend ring buffer")
+    MAX_LOG_BUFFER: int = Field(default=600, description="Max Ops log lines kept in the frontend ring buffer")
+    UI_UPDATE_THROTTLE_MS: int = Field(default=400, description="Min interval between heavy frontend re-renders (throttle)")
+
     # Feature Flags
     ENABLE_L2_BOOK: bool = Field(default=False, description="Whether to ingest level 2 full order book (Warning: high volume)")
     ENABLE_COINGECKO: bool = Field(default=False, description="Whether to run CoinGecko enrichment worker")

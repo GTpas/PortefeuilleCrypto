@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 import urllib.parse
 import urllib.request
@@ -48,6 +49,64 @@ PRICE_SOURCES = ("trade", "aggTrade", "ticker_last", "book_mid", "kline_close")
 
 # Streams subscribed per symbol (Spot). Order is irrelevant.
 STREAM_SUFFIXES = ("trade", "aggTrade", "ticker", "bookTicker", "depth@100ms")
+
+# Binance kline intervals we accept for the chart.
+VALID_INTERVALS = ("1s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h",
+                   "6h", "8h", "12h", "1d", "3d", "1w", "1M")
+
+# ── Chart ranges (1D / 7D / 1M / 1Y) ─────────────────────────────────────────
+# Canonical range keys + French UI aliases (1J / 7J / 1An). The interval used for
+# each range is configurable; the mapping below is *only* the time-window each
+# range spans, used to size the REST history request.
+CHART_RANGES = ("1D", "7D", "1M", "1Y")
+_RANGE_ALIASES = {
+    "1J": "1D", "1D": "1D", "24H": "1D",
+    "7J": "7D", "7D": "7D", "1W": "7D",
+    "1MO": "1M", "1MOIS": "1M", "1M": "1M", "30D": "1M",
+    "1AN": "1Y", "1A": "1Y", "1Y": "1Y", "12M": "1Y", "365D": "1Y",
+}
+RANGE_WINDOW_MS = {
+    "1D": 24 * 60 * 60 * 1000,
+    "7D": 7 * 24 * 60 * 60 * 1000,
+    "1M": 30 * 24 * 60 * 60 * 1000,
+    "1Y": 365 * 24 * 60 * 60 * 1000,
+}
+INTERVAL_MS = {
+    "1s": 1000, "1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000,
+    "30m": 1_800_000, "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000,
+    "6h": 21_600_000, "8h": 28_800_000, "12h": 43_200_000, "1d": 86_400_000,
+    "3d": 259_200_000, "1w": 604_800_000, "1M": 2_592_000_000,
+}
+# Default range→interval mapping (overridable from config / .env).
+DEFAULT_RANGE_INTERVALS = {"1D": "1m", "7D": "15m", "1M": "1h", "1Y": "1d"}
+
+
+def normalize_range(range_key: Optional[str], default: str = "1D") -> str:
+    """Map a UI range (incl. French aliases 1J/7J/1An) to a canonical key."""
+    if not range_key:
+        return default
+    return _RANGE_ALIASES.get(str(range_key).strip().upper(), default)
+
+
+def range_to_interval(range_key: Optional[str],
+                      intervals: Optional[dict] = None, default: str = "1D") -> str:
+    """Canonical range → Binance kline interval (pure)."""
+    intervals = intervals or DEFAULT_RANGE_INTERVALS
+    rk = normalize_range(range_key, default)
+    return intervals.get(rk, DEFAULT_RANGE_INTERVALS.get(rk, "1m"))
+
+
+def klines_limit_for_range(range_key: Optional[str], interval: str, cap: int = 1000) -> int:
+    """
+    How many candles to request for a range at an interval. Capped at ``cap``
+    (Binance REST max 1000). Returns ``cap`` when either is unknown.
+    """
+    rk = normalize_range(range_key)
+    window = RANGE_WINDOW_MS.get(rk)
+    ims = INTERVAL_MS.get(interval)
+    if not window or not ims:
+        return cap
+    return max(1, min(cap, math.ceil(window / ims)))
 
 
 def to_native(symbol: str) -> str:
@@ -618,15 +677,33 @@ class BinanceSpotHub:
         max_age_ms: int = 3000,
         kline_history: int = 500,
         chart_max_age_ms: int = 6000,
+        max_candles: int = 1500,
+        active_symbol_limit: int = 20,
+        range_intervals: Optional[dict] = None,
+        depth_only_selected: bool = True,
+        depth_buffer_max: int = 2000,
     ) -> None:
-        self.symbols = symbols
+        self.symbols = list(symbols)
+        # The always-on full-detail set (Tier 3). The currently *selected* symbol is
+        # added on demand and the oldest non-core dynamic slot is evicted, so the
+        # full-detail stream set never exceeds ``active_symbol_limit``.
+        self.core_symbols = list(symbols)
+        self.active_symbol = symbols[0] if symbols else None
+        self.active_symbol_limit = max(len(self.core_symbols), active_symbol_limit)
         self.price_source = price_source if price_source in PRICE_SOURCES else "trade"
         self.candle_interval = candle_interval
+        self.range_intervals = dict(range_intervals or DEFAULT_RANGE_INTERVALS)
         self.ws_base = ws_base.rstrip("/")
         self.rest_base = rest_base.rstrip("/")
         self.depth_limit = depth_limit
         self.max_age_ms = max_age_ms
         self.kline_history = kline_history
+        self.max_candles = max(kline_history, max_candles)
+        # When True, maintain the full L2 order book (depth stream) ONLY for the
+        # selected symbol — the other core symbols don't need their book for display.
+        self.depth_only_selected = depth_only_selected
+        # Hard cap on buffered depth diffs while the book is unsynced (bounded memory).
+        self.depth_buffer_max = max(100, depth_buffer_max)
         # Chart counts as LIVE only if a kline arrived within this window. Klines
         # push ~every 2s for >=1m intervals (1s for the 1s interval), so the default
         # is looser than the price max_age_ms.
@@ -634,18 +711,18 @@ class BinanceSpotHub:
 
         self.states: dict[str, SymbolState] = {}
         self._native_to_canonical: dict[str, str] = {}
-        for s in symbols:
-            native_up = to_upper_native(s)
-            self.states[s] = SymbolState(symbol=s, native_symbol=native_up, price_source=self.price_source)
-            self._native_to_canonical[native_up] = s
-
         self._kline_cache: dict[str, list[dict]] = {}
-        self._depth_buffer: dict[str, list[DepthUpdate]] = {s: [] for s in symbols}
+        self._depth_buffer: dict[str, list[DepthUpdate]] = {}
+        for s in self.symbols:
+            self._register_state(s)
+
         self._kline_logged: set[str] = set()  # symbols that already logged their first kline (INFO once)
         self.connected: bool = False
         self.last_connect_ms: Optional[int] = None
         self._task: Optional[asyncio.Task] = None
         self._stop = asyncio.Event()
+        self._ws = None                       # live socket (closed on a symbol/interval switch)
+        self._reconnect_requested: bool = False
 
         # best-effort metrics
         try:
@@ -663,6 +740,111 @@ class BinanceSpotHub:
             }
         except Exception:  # pragma: no cover
             self._m = {}
+
+    # — symbol registration / dynamic active selection —
+    def _register_state(self, symbol: str) -> None:
+        if symbol in self.states:
+            return
+        native_up = to_upper_native(symbol)
+        self.states[symbol] = SymbolState(symbol=symbol, native_symbol=native_up,
+                                          price_source=self.price_source)
+        self._native_to_canonical[native_up] = symbol
+        self._kline_cache.setdefault(symbol, [])
+        self._depth_buffer.setdefault(symbol, [])
+
+    def _drop_state(self, symbol: str) -> None:
+        if symbol in self.core_symbols:
+            return
+        st = self.states.pop(symbol, None)
+        if st is not None:
+            self._native_to_canonical.pop(st.native_symbol, None)
+        self._kline_cache.pop(symbol, None)
+        self._depth_buffer.pop(symbol, None)
+        self._kline_logged.discard(symbol)
+
+    # State-mutation helpers (no I/O). Public methods below add a single reconnect.
+    def _apply_active_symbol(self, symbol: str) -> bool:
+        """Make ``symbol`` the selected Tier-3 symbol. Returns True if the stream
+        set changed (a reconnect is needed)."""
+        self.active_symbol = symbol
+        if symbol in self.states:
+            return False
+        # Evict oldest non-core dynamic symbols to stay within the limit.
+        dynamic = [s for s in self.symbols if s not in self.core_symbols]
+        while len(self.symbols) >= self.active_symbol_limit and dynamic:
+            victim = dynamic.pop(0)
+            self.symbols.remove(victim)
+            self._drop_state(victim)
+        self._register_state(symbol)
+        if symbol not in self.symbols:
+            self.symbols.append(symbol)
+        return True
+
+    def _apply_interval(self, interval: str) -> bool:
+        """Switch the live kline interval. Returns True if it changed."""
+        if interval not in VALID_INTERVALS or interval == self.candle_interval:
+            return False
+        self.candle_interval = interval
+        # Clear cached candles AND the live kline state for every tracked symbol so
+        # the chart reloads cleanly at the new interval (no mixing, and chart_status
+        # honestly reports 'nodata' until a new-interval kline arrives).
+        for s in list(self._kline_cache.keys()):
+            self._kline_cache[s] = []
+        for st in self.states.values():
+            st.kline = None
+            st.last_kline_recv_ms = None
+            st.kline_event_count = 0
+        self._kline_logged.clear()
+        return True
+
+    async def set_active_symbol(self, symbol: str) -> dict:
+        """
+        Make ``symbol`` the full-detail (Tier 3) selected symbol. If already tracked
+        this is a no-op; otherwise it is added (evicting the oldest non-core slot at
+        the limit) and the WS reconnects to (un)subscribe.
+        """
+        changed = self._apply_active_symbol(symbol)
+        if changed:
+            await self._trigger_reconnect()
+        return {"symbol": symbol, "reconnect": changed, "tracked": list(self.symbols)}
+
+    async def set_chart_interval(self, interval: str) -> dict:
+        """Switch the live kline interval for the chart (drives range changes)."""
+        if interval not in VALID_INTERVALS:
+            return {"ok": False, "error": f"invalid interval {interval}",
+                    "candle_interval": self.candle_interval}
+        changed = self._apply_interval(interval)
+        if changed:
+            await self._trigger_reconnect()
+        return {"ok": True, "changed": changed, "candle_interval": self.candle_interval}
+
+    async def set_range(self, range_key: str) -> dict:
+        """Convenience: map a UI range (1D/7D/1M/1Y, incl. 1J/7J/1An) → interval and apply it."""
+        interval = range_to_interval(range_key, self.range_intervals)
+        res = await self.set_chart_interval(interval)
+        res["range"] = normalize_range(range_key)
+        res["candle_interval"] = self.candle_interval
+        return res
+
+    async def set_active_and_range(self, symbol: str, range_key: str) -> dict:
+        """Apply symbol + range together with a SINGLE reconnect (avoids the
+        double-reconnect / double REST-init burst of calling both separately)."""
+        a = self._apply_active_symbol(symbol)
+        b = self._apply_interval(range_to_interval(range_key, self.range_intervals))
+        if a or b:
+            await self._trigger_reconnect()
+        return {"symbol": symbol, "range": normalize_range(range_key),
+                "candle_interval": self.candle_interval, "reconnect": (a or b),
+                "tracked": list(self.symbols)}
+
+    async def _trigger_reconnect(self) -> None:
+        self._reconnect_requested = True
+        ws = self._ws
+        if ws is not None:
+            try:
+                await ws.close()
+            except Exception:  # pragma: no cover
+                pass
 
     # — public API —
     def has_symbol(self, symbol: str) -> bool:
@@ -683,6 +865,28 @@ class BinanceSpotHub:
     def klines(self, symbol: str) -> list[dict]:
         return list(self._kline_cache.get(symbol, []))
 
+    async def fetch_klines_range(self, symbol: str, range_key: str) -> dict:
+        """
+        Fresh REST klines for a chart range (1D/7D/1M/1Y), at the configured
+        interval for that range, capped at the Binance REST limit. Works for any
+        valid Binance Spot symbol, tracked or not.
+        """
+        interval = range_to_interval(range_key, self.range_intervals)
+        limit = klines_limit_for_range(range_key, interval, cap=min(1000, self.max_candles))
+        try:
+            rows = await asyncio.to_thread(
+                _http_get_json, f"{self.rest_base}/api/v3/klines",
+                {"symbol": to_upper_native(symbol), "interval": interval, "limit": limit},
+            )
+            return {"symbol": symbol, "range": normalize_range(range_key),
+                    "interval": interval, "candles": parse_rest_klines(rows),
+                    "source": "binance_kline"}
+        except Exception as e:
+            logger.warning("[binance_spot] range klines failed for %s %s: %s", symbol, range_key, e)
+            return {"symbol": symbol, "range": normalize_range(range_key),
+                    "interval": interval, "candles": [], "source": "binance_kline",
+                    "error": str(e)}
+
     def status(self) -> dict:
         return {
             "enabled": True,
@@ -690,6 +894,9 @@ class BinanceSpotHub:
             "price_source": self.price_source,
             "candle_interval": self.candle_interval,
             "max_age_ms": self.max_age_ms,
+            "active_symbol": self.active_symbol,
+            "core_symbols": list(self.core_symbols),
+            "full_detail_symbols": list(self.symbols),
             "symbols": [
                 {
                     "symbol": s,
@@ -714,9 +921,18 @@ class BinanceSpotHub:
             except (asyncio.CancelledError, Exception):  # pragma: no cover
                 pass
 
+    def _depth_symbols(self) -> list[str]:
+        """Symbols that get the full L2 order book (depth stream). With
+        ``depth_only_selected`` we only maintain the book for the selected symbol —
+        the other core symbols don't need their book for display (memory/bandwidth)."""
+        if self.depth_only_selected:
+            return [self.active_symbol] if (self.active_symbol in self.states) else []
+        return list(self.symbols)
+
     # — combined-stream URL —
     def _stream_url(self) -> str:
         streams = []
+        depth_set = set(self._depth_symbols())
         for s in self.symbols:
             n = to_native(s)
             streams.append(f"{n}@trade")
@@ -724,7 +940,8 @@ class BinanceSpotHub:
             streams.append(f"{n}@ticker")
             streams.append(f"{n}@bookTicker")
             streams.append(f"{n}@kline_{self.candle_interval}")
-            streams.append(f"{n}@depth@100ms")
+            if s in depth_set:
+                streams.append(f"{n}@depth@100ms")
         return f"{self.ws_base}/stream?streams={'/'.join(streams)}"
 
     async def _run(self) -> None:
@@ -733,8 +950,11 @@ class BinanceSpotHub:
         while not self._stop.is_set():
             url = self._stream_url()
             try:
-                logger.info("[binance_spot] connecting combined stream (%d symbols)", len(self.symbols))
+                logger.info("[binance_spot] connecting combined stream (%d symbols, interval=%s)",
+                            len(self.symbols), self.candle_interval)
+                self._reconnect_requested = False
                 async with websockets.connect(url, ping_interval=15, ping_timeout=10, max_queue=2048) as ws:
+                    self._ws = ws
                     self.connected = True
                     self.last_connect_ms = int(time.time() * 1000)
                     if self._m.get("connected"):
@@ -743,7 +963,10 @@ class BinanceSpotHub:
                     # REST init (klines history, book snapshot, 24h ticker) in the background
                     asyncio.create_task(self._rest_init())
                     async for raw in ws:
-                        if self._stop.is_set():
+                        # Exit on stop OR a symbol/interval switch. Checking the flag
+                        # here (not only ws.close()) closes the race where a switch
+                        # lands during the handshake, while self._ws was still None.
+                        if self._stop.is_set() or self._reconnect_requested:
                             break
                         try:
                             self._handle_message(raw)
@@ -754,11 +977,17 @@ class BinanceSpotHub:
             except Exception as e:
                 logger.warning("[binance_spot] ws error: %s", e)
             finally:
+                self._ws = None
                 self.connected = False
                 if self._m.get("connected"):
                     self._m["connected"].set(0)
             if self._stop.is_set():
                 break
+            # A user-triggered symbol/interval switch closed the socket on purpose —
+            # reconnect immediately with the new stream set (no backoff sleep).
+            if self._reconnect_requested:
+                self._reconnect_requested = False
+                continue
             await asyncio.sleep(backoff)
             backoff = min(30.0, backoff * 2)
 
@@ -846,13 +1075,18 @@ class BinanceSpotHub:
             cache[-1] = candle
         else:
             cache.append(candle)
-            if len(cache) > self.kline_history + 50:
-                del cache[0:len(cache) - (self.kline_history + 50)]
+            if len(cache) > self.max_candles:
+                del cache[0:len(cache) - self.max_candles]
 
     def _handle_depth(self, canonical: str, st: SymbolState, ev: DepthUpdate) -> None:
         ob = st.order_book
         if not ob.synced:
-            self._depth_buffer[canonical].append(ev)
+            buf = self._depth_buffer.setdefault(canonical, [])
+            buf.append(ev)
+            # Bound the buffer: if the REST snapshot keeps failing, depth diffs (~10/s)
+            # must not accumulate forever. Drop oldest beyond the cap.
+            if len(buf) > self.depth_buffer_max:
+                del buf[0:len(buf) - self.depth_buffer_max]
             return
         result = ob.apply_update(ev)
         if result == "gap":
@@ -865,10 +1099,16 @@ class BinanceSpotHub:
 
     # — REST init —
     async def _rest_init(self) -> None:
+        depth_set = set(self._depth_symbols())
         for s in self.symbols:
-            st = self.states[s]
+            st = self.states.get(s)
+            if st is None:
+                continue
             await self._load_klines(s)
-            await self._sync_order_book(s, st)
+            # Only seed the order book for symbols that actually receive the depth
+            # stream (memory: no book for non-selected symbols when depth_only_selected).
+            if s in depth_set:
+                await self._sync_order_book(s, st)
             await self._load_ticker(s)
 
     async def _load_klines(self, symbol: str) -> None:
@@ -916,3 +1156,17 @@ class BinanceSpotHub:
         except Exception as e:
             logger.warning("[binance_spot] depth snapshot failed for %s: %s", symbol, e)
             st.order_book.synced = False
+            # Drop the (now stale) buffered diffs so memory stays bounded while REST
+            # is failing, and schedule a delayed retry — otherwise synced stays False
+            # forever while @depth events keep arriving.
+            self._depth_buffer[symbol] = []
+            if not self._stop.is_set():
+                asyncio.create_task(self._retry_sync(symbol, st))
+
+    async def _retry_sync(self, symbol: str, st: SymbolState, delay: float = 2.0) -> None:
+        """Delayed order-book resync retry (one in flight per symbol via the
+        not-synced guard) so a persistently failing REST depth call self-heals
+        without spinning or leaking buffered diffs."""
+        await asyncio.sleep(delay)
+        if not self._stop.is_set() and not st.order_book.synced and symbol in self.states:
+            await self._sync_order_book(symbol, st)

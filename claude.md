@@ -116,6 +116,38 @@ Aucune logique aléatoire ne doit rester dans la chaîne décisionnelle finale.
 - **Séparation des chemins** : le hub est **display-only** ; l'`ingestor` reste le chemin de **persistance** (trade_tick/bbo_tick → aggregator → ohlcv_1s) pour le bot et l'historique. Deux connexions Binance publiques distinctes, c'est voulu. Le hub ne fabrique jamais de valeur : pas d'event réel ⇒ `nodata`.
 - **Config** : `ENABLE_BINANCE_SPOT`, `PRICE_SOURCE`, `CANDLE_SOURCE`, `CANDLE_INTERVAL`, `BINANCE_WS_BASE`, `BINANCE_REST_BASE`, `BINANCE_DEPTH_LIMIT`, `BINANCE_LIVE_MAX_AGE_MS`, `CHART_LIVE_MAX_AGE_MS` (voir `.env`). Tests offline : `tests/test_binance_spot.py` (parsing trade/aggTrade/ticker/bookTicker/kline/depth, spread/mid/bps, sélection `PRICE_SOURCE`, statut LIVE/STALE/NODATA, application + trou du carnet) ; `tests/test_chart_live.py` (conversion kline ms→s, `classify_candle_update` append/update/older, statut CHART nodata/live/stale, isolation kline par symbole, source jamais mock).
 
+### Univers marché 300 cryptos + ranges chart + mémoire (PR4)
+**But** : passer de 3 symboles à un univers de ~300 cryptos tendances **sans freeze et sans exploser la mémoire**, ajouter les ranges 1J/7J/1M/1An, et ne jamais présenter de mock comme réel.
+
+**Architecture en 3 niveaux (display-only, séparée de la persistance/bot)** :
+- **Tier 1 — univers léger (≤300)** : `market/universe.py` → `BinanceUniverseHub`. **UNE** seule WS all-market `!ticker@arr` + un refresh REST `/api/v3/ticker/24hr` (toutes les `TRENDING_REFRESH_SECONDS`) alimentent un classement **borné en mémoire**. Pas de trade/kline/depth pour les 300. `exchangeInfo` filtre aux paires **SPOT TRADING** du quote `QUOTE_ASSET`. Exclusions : stablecoins/fiat (`EXCLUDE_STABLES`), leverage tokens UP/DOWN/BULL/BEAR/3L/3S (`EXCLUDE_LEVERAGE`, garde anti-faux-positif type `JUP`), volume mini (`MIN_QUOTE_VOLUME`). **Score tendance** pur et testé : `0.45·log(quote_vol) + 0.20·log(trades) + 0.20·|chg%| + 0.10·range + 0.05·spread_quality − pénalité_staleness`.
+- **Tier 2 — watchlist active** : la fenêtre visible de l'univers (recherche/filtres/favoris) ; servie depuis l'état Tier 1, aucun flux supplémentaire.
+- **Tier 3 — symbole sélectionné** : le hub plein détail `BinanceSpotHub` (trade/aggTrade/ticker/bookTicker/kline/depth). **Sélection dynamique** : `set_active_symbol()` ajoute le symbole choisi et **évince** le plus ancien slot non-core (borne `BACKEND_ACTIVE_SYMBOL_LIMIT`, le core `ACTIVE_SYMBOLS` n'est jamais évincé) puis **reconnecte** la WS combinée (sans backoff). Cache klines borné par `MAX_CANDLES_BACKEND`.
+
+**Ranges chart (1J/7J/1M/1An)** : mapping **pur et testé** `range_to_interval()` + `klines_limit_for_range()` (capé à 1000, la limite REST Binance ; aliases FR 1J/7J/1An). Changer de range : `POST /api/market/active-symbol {symbol, range}` → le hub bascule l'intervalle kline (`set_range` → reconnect, cache vidé pour ne pas mélanger les intervalles) et renvoie les **klines REST fraîches** au bon intervalle ; le front rebase proprement. Le front **ignore** une bougie live dont l'intervalle ≠ intervalle attendu (protège le chart pendant la bascule). Conversion ms→s systématique (`Math.floor(t/1000)`), réutilise le `chartStore` anti-freeze de PR3.
+
+**Mémoire front (bornes servies par `/api/binance/config.frontend_limits`)** : watchlist **windowed** (≤`MAX_VISIBLE_SYMBOLS` lignes DOM, jamais 300), recherche **debounced**, re-render **throttlé** (`UI_UPDATE_THROTTLE_MS`), candles capées (`MAX_CANDLES_PER_SYMBOL`, trim sur `setData`), ring buffers logs/events (`MAX_LOG_BUFFER`/`MAX_EVENT_BUFFER`), `series.update()` (jamais `setData()` au tick), chart jamais recréé. Favoris en `localStorage`.
+
+**Mémoire back** : univers borné à `BACKEND_MAX_SYMBOLS` (on ne garde en RAM que les membres du top-N, les autres `!ticker@arr` sont ignorés) ; `/ws/live` throttlé par `BROADCAST_THROTTLE_MS` ; depth/order-book seulement pour Tier 3 (`ENABLE_DEPTH_ONLY_FOR_SELECTED`).
+
+**Docker** : `docker-compose.yml` durci — `mem_limit`/`memswap_limit` (db 1g, redis 320m), `logging.options.max-size`/`max-file` (rotation), redis `--maxmemory 256mb --maxmemory-policy allkeys-lru --save ""`, healthchecks conservés. `.dockerignore` créé (exclut `venv`, `__pycache__`, `.git`, `.pytest_cache`, `node_modules`, `.env`, `logs/`, rapports).
+
+**Endpoints ajoutés** (port 8000) :
+- `GET /api/market/universe?limit=300` · `GET /api/market/trending?limit=300` — top tendances (rows légers, `is_core` marqué). Vide + statut honnête si hub off.
+- `GET /api/market/source` — quelle donnée est réelle / mock / non configurée (prix, chart, univers, social).
+- `GET /api/market/symbol/{symbol}/snapshot` — plein détail si Tier 3, sinon row léger, sinon `unavailable`.
+- `GET /api/market/symbol/{symbol}/klines?range=1D` — klines REST réelles pour le range.
+- `POST /api/market/active-symbol` `{symbol, range}` — sélectionne le symbole Tier 3 + range, renvoie klines fraîches.
+- `GET /api/binance/config` enrichi : `chart_ranges`, `range_default`, `range_intervals`, `frontend_limits`, `universe_enabled`. `GET /api/health` ajoute un bloc `universe`.
+
+**Données réelles uniquement** : univers/prix/chart = Binance Spot, **explicitement sourcés** ; pas de feed → `Universe n/a` / `core only` / rows `light`, jamais une valeur fabriquée. Social reste mock-only (cf. règle PR2).
+
+**Config** (voir `.env`) : `ENABLE_MARKET_UNIVERSE`, `UNIVERSE_LIMIT`, `QUOTE_ASSET`, `MIN_QUOTE_VOLUME`, `EXCLUDE_STABLES`, `EXCLUDE_LEVERAGE`, `TRENDING_REFRESH_SECONDS`, `UNIVERSE_STALE_MS`, `BACKEND_MAX_SYMBOLS`, `BACKEND_ACTIVE_SYMBOL_LIMIT`, `MAX_CANDLES_BACKEND`, `MAX_MARKET_EVENTS`, `BROADCAST_THROTTLE_MS`, `SNAPSHOT_INTERVAL_SECONDS`, `ENABLE_DEPTH_ONLY_FOR_SELECTED`, `CHART_RANGE_DEFAULT`, `CHART_INTERVAL_{1D,7D,1M,1Y}`, `MAX_CANDLES_PER_SYMBOL`, `MAX_VISIBLE_SYMBOLS`, `MAX_EVENT_BUFFER`, `MAX_LOG_BUFFER`, `UI_UPDATE_THROTTLE_MS`.
+
+**Tests offline ajoutés** : `tests/test_market_universe.py` (stable/leverage exclusion + garde JUP, canonicalisation, parsing REST/`!ticker@arr`, score tendance ordering, filtres min-volume/spot, ranking sort/cap/rank), `tests/test_deploy_config.py` (`.dockerignore`, durcissement compose, settings présents) ; `tests/test_binance_spot.py` étendu (mapping ranges, `set_active_symbol` add/evict, `set_chart_interval`/`set_range`, cache klines borné).
+
+**Diagnostic** : chart figé → badge `CHART STALE`/`NO CANDLES` + `🔬 Source` (intervalle, `chart_status`, âges) ; écart avec Binance → `🔬 Source` (raw vs displayed, `PRICE_SOURCE`) ; univers vide → badge header `Universe n/a` + `GET /api/market/source` ; mémoire back → `GET /api/health.universe.tracked` (≤ `BACKEND_MAX_SYMBOLS`) ; mémoire Docker → `docker stats` (limites `mem_limit`).
+
 ### Supervisor & Ops / Terminals (PR2)
 Lancement unique du stack local (ne dépend plus de multiples terminaux Windows) :
 ```
@@ -169,7 +201,7 @@ $env:PYTHONPATH="."; python .\scripts\dev_supervisor.py
 | Redis | 6379 |
 
 ### Tests
-`pytest -q` (offline, pas de DB requise) : `test_scorer_thresholds`, `test_social_availability` (garde-fous anti-mock), `test_process_supervisor` (capture stdout/stderr + crash + traceback sur **vrais** subprocess), `test_ops_api` (logique Ops + routes), `test_launch_scripts` (tasks.json + scripts PowerShell valides), `test_engine_decimal`, `test_binance_spot` (hub temps réel), `test_chart_live` (feed graphique : anti-freeze, statut CHART, isolation par symbole).
+`pytest -q` (offline, pas de DB requise) : `test_scorer_thresholds`, `test_social_availability` (garde-fous anti-mock), `test_process_supervisor` (capture stdout/stderr + crash + traceback sur **vrais** subprocess), `test_ops_api` (logique Ops + routes), `test_launch_scripts` (tasks.json + scripts PowerShell valides), `test_engine_decimal`, `test_binance_spot` (hub temps réel + ranges/active-symbol/cache borné), `test_chart_live` (feed graphique : anti-freeze, statut CHART, isolation par symbole), `test_market_universe` (univers 300 : exclusions, score tendance, ranking), `test_deploy_config` (.dockerignore + durcissement compose + settings). **120 tests** au total.
 
 ## Gestion automatique des terminaux par Claude
 

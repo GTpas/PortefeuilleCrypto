@@ -1,3 +1,11 @@
+# Infra-only compose (db + redis). The application (workers + API + cockpit) runs
+# locally under the dev supervisor — see CLAUDE.md "Lancement local".
+#
+# Memory & log hardening (memory-optimization pass):
+#   * mem_limit / memswap_limit  → containers can't grow unbounded (swap disabled).
+#   * logging max-size / max-file → Docker JSON logs rotate, never fill the disk.
+#   * redis maxmemory + LRU       → the cache/queue is hard-capped.
+#   * healthchecks + restart      → unhealthy containers are visible and recovered.
 services:
   db:
     image: timescale/timescaledb:latest-pg16
@@ -12,24 +20,45 @@ services:
       - timescaledb_data:/var/lib/postgresql/data
       - ./db/migrations:/docker-entrypoint-initdb.d
     restart: unless-stopped
+    # Bound memory so a heavy ingest can't OOM the host. Tune up if you ingest a
+    # large symbol set; 1g is comfortable for the local paper-trading workload.
+    mem_limit: 1g
+    memswap_limit: 1g
+    shm_size: 256m
+    stop_grace_period: 30s
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U crypto_user -d crypto_market_data"]
       interval: 10s
       timeout: 10s
       retries: 5
       start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   redis:
     image: redis:7-alpine
     container_name: crypto_redis
+    # Cache/queue only — disable RDB snapshots, hard-cap memory, evict LRU.
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
     ports:
       - "127.0.0.1:6379:6379"
     restart: unless-stopped
+    mem_limit: 320m
+    memswap_limit: 320m
+    stop_grace_period: 10s
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
 
 volumes:
   timescaledb_data:

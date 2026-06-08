@@ -9,13 +9,23 @@ Covers the parts that decide whether the cockpit matches Binance UI:
   * order-book snapshot + diff apply, and gap detection in update IDs
 """
 
+import asyncio
+
 import pytest
 
 from market.binance_spot import (
     parse_trade, parse_agg_trade, parse_ticker, parse_book_ticker, parse_kline,
     parse_depth_update, parse_rest_klines, spread_bps, book_mid,
     OrderBook, DepthUpdate, SymbolState, BinanceSpotHub, PRICE_SOURCES,
+    normalize_range, range_to_interval, klines_limit_for_range, VALID_INTERVALS,
 )
+
+
+def _kline_msg(native, t_ms, close, interval="1m"):
+    n = native.lower()
+    return ('{"stream":"' + n + '@kline_' + interval + '","data":{"e":"kline","E":1,"s":"' + native + '",'
+            '"k":{"t":' + str(t_ms) + ',"T":' + str(t_ms + 59999) + ',"i":"' + interval + '","o":"1","c":"'
+            + str(close) + '","h":"9","l":"0","v":"5","q":"0","n":0,"x":false}}}')
 
 
 # ── Parsing ──────────────────────────────────────────────────────────────────
@@ -263,3 +273,142 @@ def test_hub_unknown_symbol_returns_none():
     hub = BinanceSpotHub(["BTC/USDT"])
     assert hub.snapshot("DOGE/USDT") is None
     assert hub.has_symbol("BTC/USDT") is True
+
+
+# ── Chart ranges (1D / 7D / 1M / 1Y) ─────────────────────────────────────────
+
+@pytest.mark.parametrize("raw,expected", [
+    ("1J", "1D"), ("1D", "1D"), ("7J", "7D"), ("7d", "7D"),
+    ("1M", "1M"), ("1Mois", "1M"), ("1An", "1Y"), ("1y", "1Y"),
+    (None, "1D"), ("garbage", "1D"),
+])
+def test_normalize_range(raw, expected):
+    assert normalize_range(raw) == expected
+
+
+def test_range_to_interval_default_and_custom():
+    assert range_to_interval("1J") == "1m"       # default map
+    assert range_to_interval("7D") == "15m"
+    assert range_to_interval("1An") == "1d"
+    custom = {"1D": "5m", "7D": "1h", "1M": "4h", "1Y": "1w"}
+    assert range_to_interval("1D", custom) == "5m"
+    assert range_to_interval("1Y", custom) == "1w"
+
+
+def test_klines_limit_for_range_capped():
+    # 1 day at 1m = 1440 candles → capped at 1000.
+    assert klines_limit_for_range("1D", "1m", cap=1000) == 1000
+    # 1 year at 1d = 365 candles → under the cap, exact.
+    assert klines_limit_for_range("1Y", "1d", cap=1000) == 365
+    # 7 days at 15m = 672 candles.
+    assert klines_limit_for_range("7D", "15m", cap=1000) == 672
+    # unknown interval → cap
+    assert klines_limit_for_range("1D", "weird", cap=500) == 500
+
+
+def test_valid_intervals_contains_common():
+    for i in ("1s", "1m", "5m", "15m", "1h", "4h", "1d"):
+        assert i in VALID_INTERVALS
+
+
+# ── Dynamic active-symbol selection (Tier 3, bounded) ────────────────────────
+
+def test_set_active_symbol_adds_and_evicts():
+    hub = BinanceSpotHub(["BTC/USDT"], active_symbol_limit=2)
+    # selecting an already-tracked (core) symbol → no reconnect
+    res = asyncio.run(hub.set_active_symbol("BTC/USDT"))
+    assert res["reconnect"] is False
+    # add ETH (room for it)
+    res = asyncio.run(hub.set_active_symbol("ETH/USDT"))
+    assert res["reconnect"] is True
+    assert hub.has_symbol("ETH/USDT")
+    assert set(hub.symbols) == {"BTC/USDT", "ETH/USDT"}
+    # add SOL → at the limit, evict the oldest dynamic (ETH); core BTC stays
+    asyncio.run(hub.set_active_symbol("SOL/USDT"))
+    assert hub.has_symbol("SOL/USDT")
+    assert not hub.has_symbol("ETH/USDT")     # evicted
+    assert hub.has_symbol("BTC/USDT")         # core never evicted
+    assert hub.active_symbol == "SOL/USDT"
+    assert len(hub.symbols) <= 2
+
+
+def test_set_chart_interval_clears_cache_and_validates():
+    hub = BinanceSpotHub(["BTC/USDT"], candle_interval="1m")
+    hub._handle_message(_kline_msg("BTCUSDT", 60000, 2.0, "1m"))
+    assert hub.klines("BTC/USDT")             # cache has a candle
+    res = asyncio.run(hub.set_chart_interval("5m"))
+    assert res["changed"] is True and hub.candle_interval == "5m"
+    assert hub.klines("BTC/USDT") == []       # cache cleared on interval switch
+    # same interval → no-op
+    assert asyncio.run(hub.set_chart_interval("5m"))["changed"] is False
+    # invalid interval rejected, interval unchanged
+    bad = asyncio.run(hub.set_chart_interval("nope"))
+    assert bad["ok"] is False and hub.candle_interval == "5m"
+
+
+def test_set_range_maps_to_interval():
+    hub = BinanceSpotHub(["BTC/USDT"], candle_interval="1m")
+    res = asyncio.run(hub.set_range("7J"))
+    assert res["range"] == "7D" and hub.candle_interval == "15m"
+
+
+# ── Bounded kline cache (memory) ─────────────────────────────────────────────
+
+def test_kline_cache_is_bounded():
+    # max_candles is clamped up to kline_history (backfill must fit), so set both.
+    hub = BinanceSpotHub(["BTC/USDT"], candle_interval="1m", kline_history=5, max_candles=5)
+    for i in range(1, 11):                     # 10 distinct 1m buckets
+        hub._handle_message(_kline_msg("BTCUSDT", i * 60000, float(i), "1m"))
+    cache = hub.klines("BTC/USDT")
+    assert len(cache) == 5                      # trimmed to max_candles
+    assert cache[-1]["close"] == 10.0           # newest kept
+    assert cache[0]["time"] == 6 * 60           # oldest five dropped
+
+
+# ── Depth-only-for-selected + bounded depth buffer (memory) ──────────────────
+
+def test_stream_url_depth_only_for_selected():
+    hub = BinanceSpotHub(["BTC/USDT", "ETH/USDT"], candle_interval="1m", depth_only_selected=True)
+    hub.active_symbol = "BTC/USDT"
+    url = hub._stream_url()
+    assert "btcusdt@depth@100ms" in url          # selected gets the book
+    assert "ethusdt@depth@100ms" not in url       # others do not
+    assert "ethusdt@trade" in url and "ethusdt@kline_1m" in url  # but keep light streams
+
+
+def test_stream_url_depth_all_when_flag_off():
+    hub = BinanceSpotHub(["BTC/USDT", "ETH/USDT"], candle_interval="1m", depth_only_selected=False)
+    url = hub._stream_url()
+    assert "btcusdt@depth@100ms" in url and "ethusdt@depth@100ms" in url
+
+
+def test_depth_buffer_capped_while_unsynced():
+    # depth_buffer_max has a sane floor of 100, so use that as the effective cap.
+    hub = BinanceSpotHub(["BTC/USDT"], candle_interval="1m", depth_buffer_max=100)
+    assert hub.states["BTC/USDT"].order_book.synced is False
+    for i in range(300):
+        hub._handle_message('{"stream":"btcusdt@depth@100ms","data":{"e":"depthUpdate","E":1,'
+                            '"s":"BTCUSDT","U":' + str(i) + ',"u":' + str(i) + ',"b":[],"a":[]}}')
+    assert len(hub._depth_buffer["BTC/USDT"]) <= 100   # bounded, never unbounded
+
+
+# ── Interval switch resets live kline state (honest chart_status) ─────────────
+
+def test_interval_switch_resets_live_kline_state():
+    hub = BinanceSpotHub(["BTC/USDT"], candle_interval="1m")
+    hub._handle_message(_kline_msg("BTCUSDT", 60000, 2.0, "1m"))
+    st = hub.states["BTC/USDT"]
+    assert st.kline is not None and st.kline_event_count == 1
+    asyncio.run(hub.set_chart_interval("5m"))
+    assert st.kline is None and st.kline_event_count == 0 and st.last_kline_recv_ms is None
+    assert st.chart_status(max_age_ms=6000) == "nodata"   # honest until a 5m kline arrives
+
+
+# ── Combined symbol+range applies once ───────────────────────────────────────
+
+def test_set_active_and_range_applies_both():
+    hub = BinanceSpotHub(["BTC/USDT"], candle_interval="1m", active_symbol_limit=5)
+    res = asyncio.run(hub.set_active_and_range("ETH/USDT", "7J"))
+    assert hub.has_symbol("ETH/USDT") and hub.active_symbol == "ETH/USDT"
+    assert hub.candle_interval == "15m"
+    assert res["reconnect"] is True and res["range"] == "7D"

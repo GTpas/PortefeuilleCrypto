@@ -16,8 +16,10 @@ from metrics import (
 logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL.upper(), "INFO"))
 logger = logging.getLogger(__name__)
 
-trade_queue: asyncio.Queue = asyncio.Queue(maxsize=50000)
-bbo_queue: asyncio.Queue = asyncio.Queue(maxsize=50000)
+# Bounded in-memory queues (back-pressure). Size is the configured MAX_MARKET_EVENTS
+# so the bound is real and tunable, not a hardcoded literal.
+trade_queue: asyncio.Queue = asyncio.Queue(maxsize=settings.MAX_MARKET_EVENTS)
+bbo_queue: asyncio.Queue = asyncio.Queue(maxsize=settings.MAX_MARKET_EVENTS)
 
 def handle_trade(trade: TradeTick):
     try:

@@ -1,0 +1,41 @@
+# Keep the Docker build context small and free of secrets/artifacts.
+# (Compose currently builds no app image — db/redis are pulled — but this keeps
+# any future Dockerfile build fast and clean, and documents what must stay out.)
+
+# Python / virtualenv
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / frontend tooling (if ever added)
+node_modules/
+
+# VCS / IDE
+.git/
+.gitignore
+.idea/
+.vscode/
+
+# Secrets & local runtime artifacts
+.env
+.env.*
+logs/
+*.log
+*.db
+ops_incidents.jsonl
+
+# Local reports / scratch (never needed in an image)
+deep-research-report*.md
+*.tmp
+
+# OS junk
+.DS_Store
+Thumbs.db
