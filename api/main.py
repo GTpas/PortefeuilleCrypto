@@ -38,6 +38,7 @@ async def lifespan(app: FastAPI):
             rest_base=settings.BINANCE_REST_BASE,
             depth_limit=settings.BINANCE_DEPTH_LIMIT,
             max_age_ms=settings.BINANCE_LIVE_MAX_AGE_MS,
+            chart_max_age_ms=settings.CHART_LIVE_MAX_AGE_MS,
         )
         await binance_hub.start()
 
@@ -711,6 +712,7 @@ async def get_binance_config():
         "candle_source": settings.CANDLE_SOURCE,
         "candle_interval": settings.CANDLE_INTERVAL,
         "max_age_ms": settings.BINANCE_LIVE_MAX_AGE_MS,
+        "chart_live_max_age_ms": settings.CHART_LIVE_MAX_AGE_MS,
         "symbols": settings.ACTIVE_SYMBOLS,
         "connected": bool(binance_hub.connected) if binance_hub else False,
     }
@@ -819,11 +821,17 @@ async def websocket_endpoint(websocket: WebSocket, symbol: str):
 
                 if record:
                     age_ms = float(record['age_ms']) if record['age_ms'] is not None else None
+                    is_stale = age_ms is not None and age_ms > settings.MAX_DATA_AGE_S * 1000
                     candle_data = {
                         "type": "candle",
                         "source": "ohlcv_derived",
+                        # Chart-feed fields mirror the hub payload so the cockpit's
+                        # chart-status badge is honest on the fallback path too.
+                        "chart_source": "ohlcv_derived",
+                        "chart_status": "stale" if is_stale else "live",
+                        "candle_age_ms": age_ms,
                         "data_age_ms": age_ms,
-                        "stale": age_ms is not None and age_ms > settings.MAX_DATA_AGE_S * 1000,
+                        "stale": is_stale,
                         "data": {
                             "time": int(record['bucket_start'].timestamp()),
                             "open": float(record['open']),

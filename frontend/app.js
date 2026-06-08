@@ -13,8 +13,165 @@ let currentSymbol = '';
 
 // Binance live-layer config (price/candle source). Fetched once on load so the
 // cockpit knows whether to draw Binance klines and which source the big number is.
-let liveConfig = { enabled: false, price_source: 'trade', candle_source: 'derived_trades', candle_interval: '1m', max_age_ms: 3000 };
+let liveConfig = { enabled: false, price_source: 'trade', candle_source: 'derived_trades', candle_interval: '1m', max_age_ms: 3000, chart_live_max_age_ms: 6000 };
 let lastLiveSnap = null;  // most recent /ws/live "live" payload, shown in the 🔬 Source panel
+
+const VOL_UP = 'rgba(38,166,154,0.5)', VOL_DOWN = 'rgba(239,83,80,0.5)';
+const CHART_STALE_MS_DEFAULT = 6000;
+
+// Verbose chart logging: ?debug=1 in the URL, or window.CHART_DEBUG = true in the console.
+const CHART_DEBUG = (typeof window !== 'undefined') &&
+    (window.CHART_DEBUG === true || /[?&]debug=1\b/.test(window.location.search));
+function chartLog(...args) { if (CHART_DEBUG) console.log('[chart]', ...args); }
+
+// ── Chart candle store (authoritative, prevents the "frozen chart" bug) ──────
+// The original bug: candlestickSeries.update() was called inside a silent
+// try/catch. Lightweight-Charts THROWS when update() gets a time older than the
+// series' last bar (e.g. a 1m kline at :00 arriving after a 1s-OHLCV backfill bar
+// at :56). The swallowed throw froze every later update while the price ticker —
+// a separate DOM path — kept moving. This store guarantees we never feed update()
+// a backwards time, tracks chart freshness independently, and logs every apply.
+const chartStore = {
+    symbol: '', interval: '', source: 'none',
+    lastTime: null, lastCandle: null, lastClose: null,
+    count: 0, klineEvents: 0, lastAppliedAt: 0,
+};
+
+// Coerce any candle time to integer SECONDS (Lightweight-Charts expects seconds).
+// Guards against a future ms slip from either feed path.
+function toChartTime(t) {
+    let n = Number(t);
+    if (!Number.isFinite(n)) return null;
+    if (n > 1e12) n = Math.floor(n / 1000);   // looks like ms → seconds
+    return Math.floor(n);
+}
+
+function chartReset(symbol) {
+    chartStore.symbol = symbol;
+    chartStore.interval = liveConfig.candle_interval || '';
+    chartStore.source = 'none';
+    chartStore.lastTime = null;
+    chartStore.lastCandle = null;
+    chartStore.lastClose = null;
+    chartStore.count = 0;
+    chartStore.klineEvents = 0;
+    chartStore.lastAppliedAt = 0;
+    try { candlestickSeries.setData([]); volumeSeries.setData([]); } catch (e) {}
+    chartLog('reset', symbol);
+}
+
+// Replace the whole series from a backfill (REST klines or DB OHLCV).
+function chartSetHistory(candles, source, interval) {
+    const seen = new Map();
+    for (const d of candles) {
+        if (!d) continue;
+        const t = toChartTime(d.time);
+        if (t == null) continue;
+        const o = Number(d.open), h = Number(d.high), l = Number(d.low), c = Number(d.close);
+        if (![o, h, l, c].every(Number.isFinite)) continue;
+        seen.set(t, { time: t, open: o, high: h, low: l, close: c, value: Number(d.value || 0) });
+    }
+    const unique = Array.from(seen.values()).sort((a, b) => a.time - b.time);
+    candlestickSeries.setData(unique.map(d => ({ time: d.time, open: d.open, high: d.high, low: d.low, close: d.close })));
+    volumeSeries.setData(unique.map(d => ({ time: d.time, value: d.value, color: d.close >= d.open ? VOL_UP : VOL_DOWN })));
+
+    const last = unique.length ? unique[unique.length - 1] : null;
+    chartStore.source = source;
+    chartStore.interval = interval || chartStore.interval;
+    chartStore.lastTime = last ? last.time : null;
+    chartStore.lastCandle = last;
+    chartStore.lastClose = last ? last.close : null;
+    chartStore.count = unique.length;
+    chartStore.lastAppliedAt = last ? Date.now() : 0;
+    chartLog(`history set: ${unique.length} candles, source=${source}, interval=${chartStore.interval}, last=${last ? new Date(last.time * 1000).toLocaleTimeString() : 'n/a'}`);
+}
+
+// Apply one live candle WITHOUT ever calling update() with a backwards time.
+// Returns true if the chart advanced.
+function chartApplyCandle(raw, source) {
+    if (!raw || raw.time == null) return false;
+    const t = toChartTime(raw.time);
+    const o = Number(raw.open), h = Number(raw.high), l = Number(raw.low), c = Number(raw.close);
+    if (t == null || ![o, h, l, c].every(Number.isFinite)) {
+        chartLog('skip non-numeric candle', raw);
+        return false;
+    }
+    const vol = Number(raw.value || 0);
+    const bar = { time: t, open: o, high: h, low: l, close: c };
+    const volBar = { time: t, value: vol, color: c >= o ? VOL_UP : VOL_DOWN };
+
+    // Backwards time → would throw and freeze the chart. Happens when the backfill
+    // source (e.g. 1s DB OHLCV) and the live source (e.g. 1m kline) disagree on the
+    // time base. Rebase the series onto the authoritative live source instead.
+    if (chartStore.lastTime != null && t < chartStore.lastTime) {
+        chartLog(`out-of-order candle t=${t} (${new Date(t * 1000).toLocaleTimeString()}) < lastTime=${chartStore.lastTime} — rebasing onto ${source}`);
+        candlestickSeries.setData([bar]);
+        volumeSeries.setData([volBar]);
+        chartStore.count = 1;
+    } else {
+        const isNew = chartStore.lastTime == null || t > chartStore.lastTime;
+        try {
+            candlestickSeries.update(bar);
+            volumeSeries.update(volBar);
+        } catch (e) {
+            console.warn('[chart] update() failed (kept series intact):', e.message || e, raw);
+            return false;
+        }
+        if (isNew) chartStore.count++;
+        chartLog(`${isNew ? 'append' : 'update'} t=${t} (${new Date(t * 1000).toLocaleTimeString()}) O=${o} H=${h} L=${l} C=${c} V=${vol} n=${chartStore.count}`);
+    }
+
+    chartStore.lastTime = t;
+    chartStore.lastCandle = bar;
+    chartStore.lastClose = c;
+    chartStore.source = source;
+    chartStore.lastAppliedAt = Date.now();
+    if (source === 'binance_kline') chartStore.klineEvents++;
+    return true;
+}
+
+// ── Chart status badge (CHART LIVE / STALE / NO CANDLES / MOCK) ──────────────
+// Deliberately SEPARATE from the price feed badge so a frozen chart is visible
+// even while the price keeps ticking — the exact failure the user reported.
+function chartStaleThreshold() {
+    return (liveConfig && liveConfig.chart_live_max_age_ms) || CHART_STALE_MS_DEFAULT;
+}
+
+function setChartStatusBadge(state, ageMs) {
+    const el = document.getElementById('chart-status');
+    if (!el) return;
+    const derived = chartStore.source === 'ohlcv_derived';
+    const map = {
+        nocandles: ['NO CANDLES', 'disconnected'],
+        offline:   ['CHART OFFLINE', 'disconnected'],
+        live:      [derived ? 'CHART LIVE (derived)' : 'CHART LIVE', 'connected'],
+        stale:     ['CHART STALE' + (typeof ageMs === 'number' ? ` ${Math.round(ageMs / 1000)}s` : ''), 'stale'],
+        mock:      ['MOCK', 'mock'],
+    };
+    const [text, cls] = map[state] || map.nocandles;
+    el.textContent = text;
+    el.className = 'status-badge ' + cls;
+    const lastT = chartStore.lastTime ? new Date(chartStore.lastTime * 1000).toLocaleTimeString() : 'n/a';
+    el.title = `chart source: ${chartStore.source} · interval ${chartStore.interval} · candles ${chartStore.count} · last bar ${lastT} · last close ${chartStore.lastClose ?? 'n/a'}`;
+    el.dataset.state = state;
+}
+
+// Recompute chart status from local apply-recency (catches a true freeze even if
+// the server keeps streaming the same candle). Runs on every tick + a watchdog.
+let chartWatchdog = null;
+function recomputeChartStatus() {
+    if (!chartStore.symbol) return;
+    if (chartStore.count === 0 || chartStore.source === 'none') { setChartStatusBadge('nocandles'); return; }
+    // Freshness from local apply-recency: if candles stop arriving (dead socket or a
+    // genuine freeze) the age grows past the threshold → CHART STALE. The price-feed
+    // badge (ws-status) carries the socket-connected signal separately.
+    const age = Date.now() - chartStore.lastAppliedAt;
+    setChartStatusBadge(age <= chartStaleThreshold() ? 'live' : 'stale', age);
+}
+function startChartWatchdog() {
+    if (chartWatchdog) clearInterval(chartWatchdog);
+    chartWatchdog = setInterval(recomputeChartStatus, 1000);
+}
 
 async function loadLiveConfig() {
     try {
@@ -94,8 +251,8 @@ async function switchSymbol(symbol) {
     if (ws) ws.close();
     currentSymbol = symbol;
     document.getElementById('current-symbol').textContent = symbol;
-    candlestickSeries.setData([]);
-    volumeSeries.setData([]);
+    chartReset(symbol);
+    setChartStatusBadge('nocandles');
 
     // Highlight active watchlist item
     document.querySelectorAll('.watchlist-item').forEach(el => {
@@ -109,36 +266,58 @@ async function switchSymbol(symbol) {
 
 // ── Historical Data ────────────────────────
 
-async function loadHistorical(symbol) {
-    try {
-        let data;
-        // Prefer real Binance klines (matches Binance UI at the configured interval).
-        if (liveConfig.enabled && liveConfig.candle_source === 'binance_kline') {
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Fetch real Binance klines, retrying while the in-process hub warms up (REST
+// init runs in the background on connect). Retrying here — instead of falling
+// back to a DIFFERENT-interval source — is what keeps the backfill time-base
+// consistent with the live kline updates (the freeze fix).
+async function fetchBinanceKlines(symbol, attempts = 4) {
+    for (let i = 0; i < attempts; i++) {
+        try {
             const kres = await fetch(`${API_URL}/binance/klines/${encodeURIComponent(symbol)}`);
             const kjson = await kres.json();
-            data = (kjson && kjson.candles) ? kjson.candles : [];
-            if (!data.length) {
-                // hub not warmed up yet → fall back to derived OHLCV so the chart isn't blank
-                const res = await fetch(`${API_URL}/historical/${encodeURIComponent(symbol)}`);
-                data = await res.json();
-            }
-        } else {
-            const res = await fetch(`${API_URL}/historical/${encodeURIComponent(symbol)}`);
-            data = await res.json();
+            const candles = (kjson && Array.isArray(kjson.candles)) ? kjson.candles : [];
+            if (candles.length) return { candles, interval: kjson.interval };
+        } catch (e) { chartLog('klines fetch error', e); }
+        if (i < attempts - 1 && symbol === currentSymbol) await sleep(700);
+        else break;
+    }
+    return { candles: [], interval: liveConfig.candle_interval };
+}
+
+async function loadHistorical(symbol) {
+    try {
+        let candles = [], source = 'none', interval = liveConfig.candle_interval;
+
+        // Prefer real Binance klines (matches Binance UI at the configured interval).
+        if (liveConfig.enabled && liveConfig.candle_source === 'binance_kline') {
+            const r = await fetchBinanceKlines(symbol);
+            candles = r.candles; interval = r.interval || interval;
+            if (candles.length) source = 'binance_kline';
         }
-        if (!data || !data.length) return;
+        // Fallback: DB-derived OHLCV (clearly marked so the badge stays honest).
+        // The safe-update rebase handles any time-base mismatch with live klines.
+        if (!candles.length) {
+            const res = await fetch(`${API_URL}/historical/${encodeURIComponent(symbol)}`);
+            const data = await res.json();
+            if (Array.isArray(data) && data.length) { candles = data; source = 'ohlcv_derived'; }
+        }
 
-        const seen = new Set(), unique = [];
-        data.forEach(d => { if (!seen.has(d.time)) { seen.add(d.time); unique.push(d); } });
-        unique.sort((a, b) => a.time - b.time);
+        if (symbol !== currentSymbol) return;   // user switched while we were fetching
 
-        try {
-            candlestickSeries.setData(unique.map(d => ({ time: d.time, open: d.open, high: d.high, low: d.low, close: d.close })));
-            volumeSeries.setData(unique.map(d => ({ time: d.time, value: d.value || 0, color: d.close >= d.open ? 'rgba(38,166,154,0.5)' : 'rgba(239,83,80,0.5)' })));
-        } catch (e) { console.error('SetData error:', e); }
+        if (!candles.length) {
+            chartStore.source = 'none'; chartStore.count = 0;
+            setChartStatusBadge('nocandles');
+            chartLog('no backfill candles for', symbol);
+            return;
+        }
 
-        const last = data[data.length - 1];
-        updateCurrentPrice(last.close, last.close >= last.open);
+        chartSetHistory(candles, source, interval);
+        if (chartStore.lastCandle) {
+            updateCurrentPrice(chartStore.lastCandle.close, chartStore.lastCandle.close >= chartStore.lastCandle.open);
+        }
+        recomputeChartStatus();
     } catch (e) { console.error('Historical error:', e); }
 }
 
@@ -218,17 +397,12 @@ function connectWebSocket(symbol) {
                           : (msg.ticker ? msg.ticker.price_change >= 0 : true);
                 updateCurrentPrice(price, isUp);
                 if (msg.candle && msg.candle.time != null) {
-                    try {
-                        const c = msg.candle;
-                        candlestickSeries.update({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close });
-                        volumeSeries.update({ time: c.time, value: c.value || 0, color: c.close >= c.open ? 'rgba(38,166,154,0.5)' : 'rgba(239,83,80,0.5)' });
-                    } catch (e) { /* chart update error, ignore */ }
+                    chartApplyCandle(msg.candle, msg.chart_source || 'binance_kline');
                 }
                 if (msg.micro) applyLiveMicrostructure(msg.micro);
-                if (document.getElementById('live-debug-modal') && !document.getElementById('live-debug-modal').classList.contains('hidden')) {
-                    renderLiveDebug(msg);
-                }
+                if (liveDebugOpen()) renderLiveDebug(msg);
                 setFeedBadge(badgeFromFeedStatus(msg.feed_status), msg.data_age_ms);
+                recomputeChartStatus();
                 return;
             }
 
@@ -237,21 +411,25 @@ function connectWebSocket(symbol) {
             const d = msg.data;
             if (!d || d.time == null || d.open == null || d.close == null) return;
             feedState.gotData = true;
-            try {
-                candlestickSeries.update({ time: d.time, open: d.open, high: d.high, low: d.low, close: d.close });
-                volumeSeries.update({ time: d.time, value: d.value || 0, color: d.close >= d.open ? 'rgba(38,166,154,0.5)' : 'rgba(239,83,80,0.5)' });
-            } catch (e) { /* chart update error, ignore silently */ }
+            chartApplyCandle(d, msg.chart_source || 'ohlcv_derived');
             updateCurrentPrice(d.close, d.close >= d.open);
             // Honest freshness: stale candle → STALE, never a misleading LIVE.
             setFeedBadge(msg.stale === true ? 'stale' : 'live', msg.data_age_ms);
+            recomputeChartStatus();
         } catch (e) { console.error('WS parse error:', e); }
     };
 
     ws.onclose = () => {
         feedState.connected = false;
         setFeedBadge('offline');
+        recomputeChartStatus();
         setTimeout(() => { if (currentSymbol === symbol) connectWebSocket(symbol); }, 3000);
     };
+}
+
+function liveDebugOpen() {
+    const m = document.getElementById('live-debug-modal');
+    return !!(m && !m.classList.contains('hidden'));
 }
 
 // Watchdog: socket open but silent for too long → "Waiting data" (never leave a
@@ -510,6 +688,9 @@ function renderLiveDebug(snap) {
     const r = snap.raw || {};
     const t = snap.ticker || {};
     const m = snap.micro || {};
+    const candle = snap.candle || {};
+    const klineTime = candle.time != null ? new Date(toChartTime(candle.time) * 1000).toLocaleTimeString() : 'n/a';
+    const chartAge = chartStore.lastAppliedAt ? (Date.now() - chartStore.lastAppliedAt) : null;
     const defs = [
         ['raw_trade_price', r.trade_price, 'trade'],
         ['raw_agg_trade_price', r.agg_trade_price, 'aggTrade'],
@@ -527,11 +708,30 @@ function renderLiveDebug(snap) {
         ['24h high', t.high, null],
         ['24h low', t.low, null],
         ['24h vol (base)', t.volume_base, null],
+        // ── chart feed (why the candles do / don't move) ──
+        ['— chart feed —', null, '__hdr__'],
+        ['chart_source', snap.chart_source || chartStore.source, '__str__'],
+        ['chart_status (server)', snap.chart_status || 'n/a', '__str__'],
+        ['candle interval', snap.candle_interval || candle.interval || chartStore.interval || 'n/a', '__str__'],
+        ['last kline close', candle.close, null],
+        ['last kline time', klineTime, '__str__'],
+        ['candle_age_ms (server)', snap.candle_age_ms, null],
+        ['kline_event_count (server)', snap.kline_event_count, null],
+        ['server candle_count', snap.candle_count, null],
+        ['chart displayed close', chartStore.lastClose, null],
+        ['chart candles (local)', chartStore.count, null],
+        ['chart applied age ms', chartAge, null],
     ];
     rows.innerHTML = defs.map(([label, val, key]) => {
+        if (key === '__hdr__') return `<tr class="ld-hdr"><td colspan="2">${label}</td></tr>`;
         const active = (key === src) || (key === '__displayed__');
-        const dp = (label.includes('%') || label.includes('imbalance') || label.includes('bps')) ? 3 : 2;
-        return `<tr class="${active ? 'ld-active' : ''}"><td>${label}</td><td>${fmtNum(val, dp)}</td></tr>`;
+        let cell;
+        if (key === '__str__') cell = escapeHtml(String(val));
+        else {
+            const dp = (label.includes('%') || label.includes('imbalance') || label.includes('bps')) ? 3 : 2;
+            cell = fmtNum(val, dp);
+        }
+        return `<tr class="${active ? 'ld-active' : ''}"><td>${label}</td><td>${cell}</td></tr>`;
     }).join('');
 }
 
@@ -1149,6 +1349,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     setupLogging();
     setupOps();
     startFeedWatchdog();
+    startChartWatchdog();
     initChart();
     await loadLiveConfig();   // know the price/candle source before loading the chart
     loadSymbols();

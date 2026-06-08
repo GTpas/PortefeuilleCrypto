@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     BINANCE_REST_BASE: str = Field(default="https://api.binance.com", description="Binance Spot REST base for klines/depth/ticker snapshots")
     BINANCE_DEPTH_LIMIT: int = Field(default=100, description="REST order-book snapshot depth (5|10|20|50|100|500|1000)")
     BINANCE_LIVE_MAX_AGE_MS: int = Field(default=3000, description="Displayed price counts as LIVE only if a real Binance event arrived within this window (ms); older → STALE")
+    # Chart counts as CHART LIVE only if a kline arrived within this window. Klines
+    # push ~every 2s for >=1m intervals (1s for the 1s interval), so this is looser
+    # than the price freshness window above. Older → CHART STALE; never received → NO CANDLES.
+    CHART_LIVE_MAX_AGE_MS: int = Field(default=6000, description="Chart (kline) freshness window (ms): CHART LIVE if a kline arrived within it, else CHART STALE")
 
     # Feature Flags
     ENABLE_L2_BOOK: bool = Field(default=False, description="Whether to ingest level 2 full order book (Warning: high volume)")

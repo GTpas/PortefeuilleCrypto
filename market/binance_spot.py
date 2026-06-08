@@ -234,6 +234,23 @@ def parse_rest_klines(rows: list) -> list[dict]:
     return out
 
 
+def classify_candle_update(last_time: Optional[int], new_time: int) -> str:
+    """
+    Decide how a new candle relates to the current chart series. Mirrors the
+    frontend's safe-update logic so the chart never calls lightweight-charts'
+    ``update()`` with a backwards time (which throws and silently freezes the
+    whole chart — the original "frozen chart" bug).
+      "append" — first bar, or a strictly newer bucket (``new_time > last_time``)
+      "update" — same bucket → refresh the in-progress bar (``new_time == last_time``)
+      "older"  — ``new_time < last_time`` → must NOT be passed to ``update()`` as-is
+    """
+    if last_time is None or new_time > last_time:
+        return "append"
+    if new_time == last_time:
+        return "update"
+    return "older"
+
+
 # ── Microstructure helpers (pure) ────────────────────────────────────────────
 
 def spread_bps(bid: float, ask: float) -> Optional[float]:
@@ -381,6 +398,8 @@ class SymbolState:
     last_event_ms: Optional[int] = None      # max Binance event time seen
     last_recv_ms: Optional[int] = None       # local wall-clock of last event
     last_price_event_ms: Optional[int] = None  # event time of the chosen price source
+    last_kline_recv_ms: Optional[int] = None  # local wall-clock of last *kline* event (drives CHART status)
+    kline_event_count: int = 0                # number of kline events applied (chart liveness proof)
 
     def _now_ms(self) -> int:
         return int(time.time() * 1000)
@@ -440,6 +459,24 @@ class SymbolState:
             return "nodata"
         return "live" if age <= max_age_ms else "stale"
 
+    # — chart (kline) freshness, kept SEPARATE from the price feed so a frozen
+    #   chart is visible even while the price ticker keeps moving —
+    def candle_age_ms(self, now_ms: Optional[int] = None) -> Optional[float]:
+        """Age of the last *kline* event against local receive time."""
+        if self.last_kline_recv_ms is None:
+            return None
+        now_ms = now_ms if now_ms is not None else self._now_ms()
+        return max(0.0, now_ms - self.last_kline_recv_ms)
+
+    def chart_status(self, max_age_ms: int, now_ms: Optional[int] = None) -> str:
+        """nodata (no candle yet) | live (fresh kline) | stale (klines stopped). Never fabricated."""
+        if self.kline is None:
+            return "nodata"
+        age = self.candle_age_ms(now_ms)
+        if age is None:
+            return "nodata"
+        return "live" if age <= max_age_ms else "stale"
+
     # — microstructure (prefer full book, fall back to bookTicker spread) —
     def microstructure(self) -> dict:
         ob = self.order_book
@@ -465,9 +502,11 @@ class SymbolState:
         }
         return out
 
-    def snapshot(self, max_age_ms: int, now_ms: Optional[int] = None) -> dict:
+    def snapshot(self, max_age_ms: int, now_ms: Optional[int] = None,
+                 chart_max_age_ms: Optional[int] = None) -> dict:
         """Full raw-vs-displayed view used by the API debug endpoint and /ws/live."""
         now_ms = now_ms if now_ms is not None else self._now_ms()
+        chart_max = chart_max_age_ms if chart_max_age_ms is not None else max_age_ms
         bm = book_mid(self.book.bid_px, self.book.ask_px) if self.book else None
         raw = {
             "trade_price": self.trade.price if self.trade else None,
@@ -513,6 +552,12 @@ class SymbolState:
             "ticker": ticker,
             "micro": self.microstructure(),
             "candle": candle,
+            # Chart feed status, explicitly separate from the price feed above so the
+            # cockpit can show CHART LIVE/STALE/NO CANDLES even while the price ticks.
+            "chart_source": "binance_kline",
+            "chart_status": self.chart_status(chart_max, now_ms),
+            "candle_age_ms": self.candle_age_ms(now_ms),
+            "kline_event_count": self.kline_event_count,
         }
 
     # — ingest (mutating, called by the hub on the event loop) —
@@ -539,6 +584,8 @@ class SymbolState:
 
     def on_kline(self, ev: KlineEvent) -> None:
         self.kline = ev
+        self.last_kline_recv_ms = self._now_ms()
+        self.kline_event_count += 1
         self._touch(ev.ts_event_ms)
 
 
@@ -570,6 +617,7 @@ class BinanceSpotHub:
         depth_limit: int = 100,
         max_age_ms: int = 3000,
         kline_history: int = 500,
+        chart_max_age_ms: int = 6000,
     ) -> None:
         self.symbols = symbols
         self.price_source = price_source if price_source in PRICE_SOURCES else "trade"
@@ -579,6 +627,10 @@ class BinanceSpotHub:
         self.depth_limit = depth_limit
         self.max_age_ms = max_age_ms
         self.kline_history = kline_history
+        # Chart counts as LIVE only if a kline arrived within this window. Klines
+        # push ~every 2s for >=1m intervals (1s for the 1s interval), so the default
+        # is looser than the price max_age_ms.
+        self.chart_max_age_ms = chart_max_age_ms
 
         self.states: dict[str, SymbolState] = {}
         self._native_to_canonical: dict[str, str] = {}
@@ -589,6 +641,7 @@ class BinanceSpotHub:
 
         self._kline_cache: dict[str, list[dict]] = {}
         self._depth_buffer: dict[str, list[DepthUpdate]] = {s: [] for s in symbols}
+        self._kline_logged: set[str] = set()  # symbols that already logged their first kline (INFO once)
         self.connected: bool = False
         self.last_connect_ms: Optional[int] = None
         self._task: Optional[asyncio.Task] = None
@@ -619,7 +672,9 @@ class BinanceSpotHub:
         st = self.states.get(symbol)
         if not st:
             return None
-        snap = st.snapshot(self.max_age_ms)
+        snap = st.snapshot(self.max_age_ms, chart_max_age_ms=self.chart_max_age_ms)
+        snap["candle_count"] = len(self._kline_cache.get(symbol, []))
+        snap["candle_interval"] = self.candle_interval
         m = self._m.get("staleness")
         if m is not None and snap["data_age_ms"] is not None:
             m.labels(symbol=symbol).set(snap["data_age_ms"])
@@ -744,6 +799,7 @@ class BinanceSpotHub:
             if st:
                 st.on_kline(ev)
                 self._update_kline_cache(canonical, ev)
+                self._log_kline(canonical, ev)
             count("kline")
         elif etype == "depthUpdate":
             ev = parse_depth_update(data)
@@ -762,6 +818,23 @@ class BinanceSpotHub:
             lat = st.latency_ms()
             if lat is not None:
                 self._m["latency"].observe(lat)
+
+    def _log_kline(self, canonical: str, ev: KlineEvent) -> None:
+        """Explicit chart-feed evidence: first kline per symbol at INFO, the rest at DEBUG."""
+        first = canonical not in self._kline_logged
+        if first:
+            self._kline_logged.add(canonical)
+        lvl = logging.INFO if first else logging.DEBUG
+        if logger.isEnabledFor(lvl):
+            cache_n = len(self._kline_cache.get(canonical, []))
+            logger.log(
+                lvl,
+                "[binance_spot] kline %s %s open_ms=%d close_ms=%d O=%s H=%s L=%s C=%s V=%s "
+                "closed=%s recv_ms=%d candles=%d",
+                canonical, ev.interval, ev.start_ms, ev.close_ms,
+                ev.open, ev.high, ev.low, ev.close, ev.volume_base, ev.is_closed,
+                int(time.time() * 1000), cache_n,
+            )
 
     def _update_kline_cache(self, canonical: str, ev: KlineEvent) -> None:
         cache = self._kline_cache.setdefault(canonical, [])
