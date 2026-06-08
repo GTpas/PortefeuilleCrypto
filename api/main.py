@@ -811,6 +811,19 @@ async def get_market_trending(limit: int = 300):
     return await get_market_universe(limit=limit)
 
 
+@app.get("/api/market/universe/debug")
+async def get_market_universe_debug():
+    """Explain the final universe count: raw Binance tickers, exchangeInfo spot
+    pairs, eligible count, and rejections by reason (with examples). A count below
+    UNIVERSE_LIMIT is immediately attributable here (e.g. a too-high volume floor
+    inflating excluded_low_volume_count)."""
+    if not universe_hub:
+        return {"enabled": False, "reason": "universe_disabled",
+                "universe_limit": settings.UNIVERSE_LIMIT}
+    return {"enabled": True, "visible_limit": settings.MAX_VISIBLE_SYMBOLS,
+            **universe_hub.debug()}
+
+
 @app.get("/api/market/source")
 async def get_market_source():
     """What is real vs mock vs not-configured — so the cockpit never mislabels data."""

@@ -54,7 +54,12 @@ class Settings(BaseSettings):
     ENABLE_MARKET_UNIVERSE: bool = Field(default=True, description="Run the in-process light universe hub (top trending Binance Spot pairs, display-only)")
     UNIVERSE_LIMIT: int = Field(default=300, description="Max number of trending symbols kept in the universe (hard cap)")
     QUOTE_ASSET: str = Field(default="USDT", description="Quote asset for the universe (e.g. USDT). Only <BASE>/<QUOTE> spot pairs are considered")
-    MIN_QUOTE_VOLUME: float = Field(default=5_000_000.0, description="Minimum 24h quote volume for a pair to enter the universe (liquidity/activity floor)")
+    # Liquidity floor to enter the universe. Sized so ~300+ Binance USDT spot pairs
+    # qualify (a 5M floor only leaves ~70 → the cockpit capped at ~66). Lowering it
+    # to 500K leaves ~305 eligible, so the top-N=300 ranking fills. Raise it to
+    # tighten liquidity, but the universe count will shrink accordingly (see
+    # /api/market/universe/debug.excluded_low_volume_count).
+    MIN_QUOTE_VOLUME: float = Field(default=500_000.0, description="Minimum 24h quote volume (quote asset) for a pair to enter the universe (liquidity floor)")
     EXCLUDE_STABLES: bool = Field(default=True, description="Exclude pure stablecoin/fiat bases (USDC, FDUSD, EUR…) from the universe")
     EXCLUDE_LEVERAGE: bool = Field(default=True, description="Exclude leverage tokens (UP/DOWN/BULL/BEAR, 3L/3S…) from the universe")
     TRENDING_REFRESH_SECONDS: int = Field(default=60, description="How often the universe ranking is recomputed from the live ticker state")

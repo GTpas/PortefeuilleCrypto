@@ -133,6 +133,7 @@ class UniverseTicker:
         age = self.age_ms(now_ms)
         return {
             "symbol": self.symbol,
+            "native_symbol": f"{self.base}{self.quote}",
             "base": self.base,
             "quote": self.quote,
             "price": self.last,
@@ -143,6 +144,7 @@ class UniverseTicker:
             "spread_bps": self.spread_bps(),
             "trending_score": round(trending_score(self), 6),
             "age_ms": age,
+            "updated_at": self.recv_ms,
             "stale": (age is not None and age > stale_ms),
             "source": "binance_spot",
         }
@@ -217,19 +219,35 @@ def trending_score(t: UniverseTicker, now_ms: Optional[int] = None,
 
 # ── Filtering + ranking (pure) ───────────────────────────────────────────────
 
+# Stable ordering of rejection reasons (mirrors the debug counters below).
+REJECT_REASONS = ("not_spot", "inactive", "stable", "leverage", "low_volume")
+
+
+def rejection_reason(t: UniverseTicker, *, exclude_stables: bool, exclude_leverage: bool,
+                     min_quote_volume: float, valid_spot: Optional[set[str]] = None) -> Optional[str]:
+    """Single source of truth for universe filtering. Returns the reason a ticker
+    is excluded, or ``None`` if it passes. Order matches ``REJECT_REASONS`` and is
+    significant: a symbol is attributed to the FIRST reason it fails (so the debug
+    counters partition the rejected set, never double-count)."""
+    if valid_spot is not None and t.symbol not in valid_spot:
+        return "not_spot"
+    if t.last <= 0:
+        return "inactive"
+    if exclude_stables and is_stablecoin(t.base):
+        return "stable"
+    if exclude_leverage and is_leverage_token(t.base):
+        return "leverage"
+    if t.quote_volume < min_quote_volume:
+        return "low_volume"
+    return None
+
+
 def passes_filters(t: UniverseTicker, *, exclude_stables: bool, exclude_leverage: bool,
                    min_quote_volume: float, valid_spot: Optional[set[str]] = None) -> bool:
-    if valid_spot is not None and t.symbol not in valid_spot:
-        return False
-    if t.quote_volume < min_quote_volume:
-        return False
-    if t.last <= 0:
-        return False
-    if exclude_stables and is_stablecoin(t.base):
-        return False
-    if exclude_leverage and is_leverage_token(t.base):
-        return False
-    return True
+    return rejection_reason(
+        t, exclude_stables=exclude_stables, exclude_leverage=exclude_leverage,
+        min_quote_volume=min_quote_volume, valid_spot=valid_spot,
+    ) is None
 
 
 def rank_universe(tickers: Iterable[UniverseTicker], *, limit: int,
@@ -299,9 +317,12 @@ class BinanceUniverseHub:
         self._tickers: dict[str, UniverseTicker] = {}   # canonical → live ticker (bounded)
         self._universe_set: set[str] = set()            # current top-N membership
         self._valid_spot: Optional[set[str]] = None     # SPOT/TRADING set from exchangeInfo
-        self._ranked: list[dict] = []                   # cached ranked rows
+        self._exchange_info_count: int = 0              # # of SPOT/TRADING pairs for this quote
+        self._ranked: list[dict] = []                   # cached ranked rows (last GOOD snapshot)
         self.connected: bool = False
         self.last_refresh_ms: Optional[int] = None
+        self.last_ws_update_ms: Optional[int] = None
+        self._debug: dict = {}                          # last refresh diagnostics (see debug())
         self._task: Optional[asyncio.Task] = None
         self._stop = asyncio.Event()
 
@@ -338,6 +359,27 @@ class BinanceUniverseHub:
             "source": "binance_spot",
         }
 
+    def debug(self) -> dict:
+        """Why is the final universe count what it is — so a count < limit is
+        immediately explainable (too-high volume floor, filters, partial REST…)."""
+        now = int(time.time() * 1000)
+        d = dict(self._debug)
+        d.update({
+            "requested_limit": self.limit,
+            "backend_max_symbols": self.max_symbols,
+            "min_quote_volume": self.min_quote_volume,
+            "quote_asset": self.quote,
+            "exclude_stables": self.exclude_stables,
+            "exclude_leverage": self.exclude_leverage,
+            "connected": self.connected,
+            "source": "binance_spot",
+            "last_rest_refresh_ms": self.last_refresh_ms,
+            "last_ws_update_ms": self.last_ws_update_ms,
+            "cache_age_ms": (now - self.last_refresh_ms) if self.last_refresh_ms else None,
+            "final_universe_count": len(self._ranked),
+        })
+        return d
+
     # — lifecycle —
     async def start(self) -> None:
         # Seed concurrently (don't block API startup on Binance REST latency); the
@@ -362,9 +404,17 @@ class BinanceUniverseHub:
             min_quote_volume=self.min_quote_volume, valid_spot=self._valid_spot,
             stale_ms=self.stale_ms,
         )
+        if self.last_refresh_ms:
+            from metrics import universe_cache_age_ms
+            universe_cache_age_ms.set(int(time.time() * 1000) - self.last_refresh_ms)
 
     # — REST refresh (membership + a fresh full snapshot) —
     async def _refresh(self) -> None:
+        from metrics import (universe_refresh_total, universe_refresh_errors_total,
+                             universe_refresh_latency_ms, universe_symbols_loaded,
+                             universe_symbols_eligible)
+        universe_refresh_total.inc()
+        t0 = time.time()
         try:
             if self._valid_spot is None:
                 self._valid_spot = await asyncio.to_thread(self._load_valid_spot)
@@ -372,19 +422,33 @@ class BinanceUniverseHub:
                 _http_get_json, f"{self.rest_base}/api/v3/ticker/24hr", {}
             )
         except Exception as e:
-            logger.warning("[universe] REST refresh failed: %s", e)
+            # Keep the previous good snapshot — never blank the universe on a
+            # transient REST failure (atomic swap only happens on success below).
+            universe_refresh_errors_total.inc()
+            self._debug["last_error"] = str(e)
+            logger.warning("[universe] REST refresh failed (kept last snapshot): %s", e)
             return
 
+        raw_list = rows if isinstance(rows, list) else []
+        raw_count = len(raw_list)
+        rejected = {r: 0 for r in REJECT_REASONS}
+        rejected_examples: dict[str, list[str]] = {r: [] for r in REJECT_REASONS}
+        not_quote = 0  # rows whose symbol is not a <base>/<QUOTE> pair (other quotes)
         candidates: list[UniverseTicker] = []
-        for d in rows if isinstance(rows, list) else []:
+        for d in raw_list:
             t = parse_rest_24h(d, self.quote)
             if t is None:
+                not_quote += 1
                 continue
-            if passes_filters(t, exclude_stables=self.exclude_stables,
-                              exclude_leverage=self.exclude_leverage,
-                              min_quote_volume=self.min_quote_volume,
-                              valid_spot=self._valid_spot):
+            reason = rejection_reason(
+                t, exclude_stables=self.exclude_stables, exclude_leverage=self.exclude_leverage,
+                min_quote_volume=self.min_quote_volume, valid_spot=self._valid_spot)
+            if reason is None:
                 candidates.append(t)
+            else:
+                rejected[reason] += 1
+                if len(rejected_examples[reason]) < 5:
+                    rejected_examples[reason].append(t.symbol)
 
         ranked = rank_universe(
             candidates, limit=self.limit, exclude_stables=self.exclude_stables,
@@ -392,15 +456,38 @@ class BinanceUniverseHub:
             valid_spot=self._valid_spot, stale_ms=self.stale_ms,
         )
         members = {r["symbol"] for r in ranked}
-        # Rebuild the bounded ticker map from this snapshot (drops symbols that
-        # left the top-N → memory stays bounded by limit, never grows unbounded).
+        # Atomic swap: build the new bounded ticker map, then publish all three
+        # views together. Drops symbols that left the top-N → memory bounded by
+        # limit, never grows unbounded.
         by_sym = {t.symbol: t for t in candidates}
-        self._tickers = {s: by_sym[s] for s in members if s in by_sym}
+        new_tickers = {s: by_sym[s] for s in members if s in by_sym}
+        self._tickers = new_tickers
         self._universe_set = members
         self._ranked = ranked
         self.last_refresh_ms = int(time.time() * 1000)
-        logger.info("[universe] refreshed: %d symbols (of %d candidates)",
-                    len(members), len(candidates))
+        latency_ms = (time.time() - t0) * 1000.0
+        universe_refresh_latency_ms.observe(latency_ms)
+        universe_symbols_loaded.set(len(ranked))
+        universe_symbols_eligible.set(len(candidates))
+        self._debug = {
+            "raw_binance_tickers_count": raw_count,
+            "quote_mismatch_count": not_quote,
+            "exchange_info_symbols_count": self._exchange_info_count,
+            "eligible_symbols_count": len(candidates),
+            "excluded_not_spot_count": rejected["not_spot"],
+            "excluded_inactive_count": rejected["inactive"],
+            "excluded_stable_count": rejected["stable"],
+            "excluded_leverage_count": rejected["leverage"],
+            "excluded_low_volume_count": rejected["low_volume"],
+            "rejected_examples": rejected_examples,
+            "capped_by_limit": max(0, len(candidates) - len(ranked)),
+            "build_latency_ms": round(latency_ms, 1),
+            "last_error": None,
+        }
+        logger.info("[universe] refreshed: %d ranked / %d eligible / %d raw "
+                    "(excl stable=%d lev=%d lowvol=%d not_spot=%d) in %.0fms",
+                    len(ranked), len(candidates), raw_count, rejected["stable"],
+                    rejected["leverage"], rejected["low_volume"], rejected["not_spot"], latency_ms)
 
     def _load_valid_spot(self) -> Optional[set[str]]:
         """SPOT + TRADING pairs for the configured quote, from exchangeInfo."""
@@ -419,6 +506,7 @@ class BinanceUniverseHub:
             if not (s.get("isSpotTradingAllowed") or "SPOT" in perms):
                 continue
             out.add(f"{s.get('baseAsset', '').upper()}/{self.quote}")
+        self._exchange_info_count = len(out)
         return out or None
 
     # — live WS (all-market light ticker) —
@@ -476,6 +564,7 @@ class BinanceUniverseHub:
             t = parse_arr_ticker(d, self.quote)
             if t is not None:
                 self._tickers[sym] = t
+        self.last_ws_update_ms = int(time.time() * 1000)
         # Hard memory guard (defensive — membership already bounds this).
         if len(self._tickers) > self.max_symbols:
             keep = set(self._universe_set)

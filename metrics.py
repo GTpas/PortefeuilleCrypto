@@ -80,6 +80,27 @@ binance_book_resync_total = Counter(
     "binance_book_resync_total", "Order-book resyncs (gap detected in depth update IDs)", ["symbol"]
 )
 
+# ── Market universe (Tier 1: light, top-trending ranking) ──────────
+universe_refresh_total = Counter(
+    "universe_refresh_total", "Universe REST snapshot rebuilds attempted"
+)
+universe_refresh_errors_total = Counter(
+    "universe_refresh_errors_total", "Universe REST snapshot rebuilds that failed (kept previous snapshot)"
+)
+universe_refresh_latency_ms = Histogram(
+    "universe_refresh_latency_ms", "Time to build one universe snapshot (ms)",
+    buckets=(25, 50, 100, 250, 500, 1000, 2500, 5000, 10000),
+)
+universe_symbols_loaded = Gauge(
+    "universe_symbols_loaded", "Symbols in the current ranked universe snapshot"
+)
+universe_symbols_eligible = Gauge(
+    "universe_symbols_eligible", "Symbols passing all filters before the top-N cap"
+)
+universe_cache_age_ms = Gauge(
+    "universe_cache_age_ms", "Age (ms) of the current universe snapshot"
+)
+
 # ── Storage / writer ─────────────────────────
 db_write_latency_ms = Histogram(
     "db_write_latency_ms", "Batch DB write latency (ms)",

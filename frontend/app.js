@@ -764,11 +764,24 @@ async function updateSignals() {
 }
 
 // ── Microstructure ─────────────────────────
+// Explicit "this metric is genuinely not available right now, and here's why"
+// — never a silent bare n/a. reason shows on hover and is announced via title.
+function setMicroUnavail(id, label, reason) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = label;                 // e.g. 'unavail' / 'stale 12s' / 'L2 off'
+    el.className = 'micro-value unavailable';
+    el.title = reason || '';
+}
 function setMicro(id, value, goodThresh, badThresh, format, invert = false) {
     const el = document.getElementById(id);
     if (!el) return;
-    if (value == null || Number.isNaN(value)) { el.textContent = 'n/a'; el.className = 'micro-value'; return; }
+    if (value == null || Number.isNaN(value)) {
+        setMicroUnavail(id, 'unavail', 'no real value for this metric on the selected symbol');
+        return;
+    }
     el.textContent = format(value);
+    el.title = '';
     let cls = 'micro-value';
     if (invert) { if (value <= goodThresh) cls += ' good'; else if (value >= badThresh) cls += ' bad'; else cls += ' warn'; }
     else { if (value >= goodThresh) cls += ' good'; else if (value <= badThresh) cls += ' bad'; else cls += ' warn'; }
@@ -788,9 +801,17 @@ async function updateMicrostructure(symbol) {
         const res = await fetch(`${API_URL}/market-features/${encodeURIComponent(symbol)}`);
         const d = await res.json();
         if (!d || d.error) {
-            // Keep live-fed values if the hub is streaming them; only clear DB-only cells.
-            if (!liveActive) ['micro-spread', 'micro-depth', 'micro-imbalance', 'micro-slippage'].forEach(id => { const el = document.getElementById(id); if (el) { el.textContent = 'n/a'; el.className = 'micro-value'; } });
-            ['micro-pressure', 'micro-relvol'].forEach(id => { const el = document.getElementById(id); if (el) { el.textContent = 'n/a'; el.className = 'micro-value'; } });
+            // Honest unavailability with a reason — not a silent n/a. The live hub
+            // (selected symbol) feeds spread/depth/imbalance/slippage when active;
+            // pressure/relvol come only from the DB feature row (aggregated trades).
+            if (!liveActive) {
+                setMicroUnavail('micro-spread', 'unavail', 'no live book — select this symbol to stream its bookTicker');
+                setMicroUnavail('micro-depth', 'unavail', 'no live order book for this symbol (L2 only for the selected symbol)');
+                setMicroUnavail('micro-imbalance', 'unavail', 'no live book/depth for this symbol');
+                setMicroUnavail('micro-slippage', 'unavail', 'needs live depth — unavailable without the selected-symbol order book');
+            }
+            setMicroUnavail('micro-pressure', 'unavail', 'no aggregated-trade feature row yet (insufficient recent trades)');
+            setMicroUnavail('micro-relvol', 'unavail', 'insufficient 24h volume history to compute relative volume');
             return;
         }
         if (!liveActive) {

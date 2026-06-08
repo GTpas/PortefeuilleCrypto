@@ -435,6 +435,7 @@ select:hover, select:focus { border-color: var(--accent-color); }
 .micro-value.good { color: var(--up-color); }
 .micro-value.warn { color: var(--warn-color); }
 .micro-value.bad { color: var(--down-color); }
+.micro-value.unavailable { color: var(--text-muted); font-style: italic; font-weight: 500; font-size: 0.68rem; cursor: help; }
 
 /* ============================================
    ACTIVITY FEED (bottom)

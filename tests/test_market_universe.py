@@ -14,7 +14,8 @@ import pytest
 from market.universe import (
     is_stablecoin, is_leverage_token, to_canonical,
     parse_rest_24h, parse_arr_ticker, trending_score,
-    passes_filters, rank_universe, UniverseTicker, STABLE_BASES,
+    passes_filters, rejection_reason, REJECT_REASONS,
+    rank_universe, BinanceUniverseHub, UniverseTicker, STABLE_BASES,
 )
 
 
@@ -156,7 +157,116 @@ def test_rank_universe_respects_min_volume():
 def test_row_shape_has_required_fields():
     rows = rank_universe([mk("BTC/USDT")], limit=1, min_quote_volume=0, now_ms=1000)
     r = rows[0]
-    for key in ("symbol", "price", "change_pct", "quote_volume", "num_trades",
-                "spread_bps", "trending_score", "rank", "stale", "source"):
+    for key in ("symbol", "native_symbol", "price", "change_pct", "quote_volume",
+                "num_trades", "spread_bps", "trending_score", "rank", "stale",
+                "updated_at", "source"):
         assert key in r
     assert r["source"] == "binance_spot"
+    assert r["native_symbol"] == "BTCUSDT"
+
+
+# ── Rejection reasons (single source of truth for filtering) ─────────────────
+
+def test_rejection_reason_partitions_by_first_failure():
+    # not_spot wins over everything (symbol not in the valid spot set)
+    assert rejection_reason(mk("USDC/USDT"), exclude_stables=True, exclude_leverage=True,
+                            min_quote_volume=0, valid_spot={"BTC/USDT"}) == "not_spot"
+    assert rejection_reason(mk("USDC/USDT"), exclude_stables=True, exclude_leverage=True,
+                            min_quote_volume=0) == "stable"
+    assert rejection_reason(mk("ETH3L/USDT"), exclude_stables=True, exclude_leverage=True,
+                            min_quote_volume=0) == "leverage"
+    assert rejection_reason(mk("DOGE/USDT", qv=10), exclude_stables=True, exclude_leverage=True,
+                            min_quote_volume=1e6) == "low_volume"
+    assert rejection_reason(mk("DOGE/USDT", last=0.0), exclude_stables=True,
+                            exclude_leverage=True, min_quote_volume=0) == "inactive"
+    assert rejection_reason(mk("DOGE/USDT", qv=1e8), exclude_stables=True,
+                            exclude_leverage=True, min_quote_volume=1e6) is None
+    assert set(REJECT_REASONS) == {"not_spot", "inactive", "stable", "leverage", "low_volume"}
+
+
+def test_stablecoin_filter_keeps_valid_altcoins():
+    # JUP ends in "UP" but is a real token; PEPE/DOGE/SUN are real — none excluded.
+    for sym in ("JUP/USDT", "PEPE/USDT", "DOGE/USDT", "SUN/USDT", "BTC/USDT"):
+        assert rejection_reason(mk(sym, qv=1e8), exclude_stables=True,
+                                exclude_leverage=True, min_quote_volume=1e6) is None
+
+
+# ── Universe count: 300 when eligible, never silently capped at 66 ───────────
+
+def _ranked_count(n_eligible, *, limit, min_qv):
+    """Build n_eligible distinct eligible USDT tickers above min_qv and rank them."""
+    tickers = [mk(f"C{i:04d}/USDT", qv=min_qv * 2 + i) for i in range(n_eligible)]
+    return len(rank_universe(tickers, limit=limit, min_quote_volume=min_qv, now_ms=1000))
+
+
+def test_universe_loads_300_when_eligible_symbols_exist():
+    assert _ranked_count(305, limit=300, min_qv=500_000) == 300
+
+
+def test_universe_does_not_cap_to_66():
+    # The historical bug: a 5M floor left ~70 eligible → ~66 shown. With a 500K
+    # floor and 305 eligible, the ranking must fill to the full 300, not 66.
+    assert _ranked_count(305, limit=300, min_qv=500_000) > 66
+
+
+def test_universe_returns_all_eligible_when_fewer_than_limit():
+    assert _ranked_count(120, limit=300, min_qv=500_000) == 120
+
+
+# ── Hub debug counters + snapshot atomicity (no network) ─────────────────────
+
+def _hub():
+    h = BinanceUniverseHub(limit=300, min_quote_volume=500_000, max_symbols=300)
+    # Offline: skip the exchangeInfo network call; None means "don't gate on spot".
+    h._load_valid_spot = lambda: None
+    return h
+
+
+def _fake_rest_rows():
+    # 305 real altcoins above the floor + stables + leverage + one low-vol dust.
+    rows = [{"symbol": f"C{i:04d}USDT", "lastPrice": "1.0", "openPrice": "1.0",
+             "highPrice": "1.1", "lowPrice": "0.9", "priceChangePercent": "2.0",
+             "quoteVolume": str(1_000_000 + i), "volume": "1000", "count": "5000",
+             "bidPrice": "0.999", "askPrice": "1.001", "closeTime": "1700000000000"}
+            for i in range(305)]
+    rows.append({"symbol": "USDCUSDT", "lastPrice": "1.0", "quoteVolume": "9e9", "count": "1"})
+    rows.append({"symbol": "ETH3LUSDT", "lastPrice": "1.0", "quoteVolume": "8e9", "count": "1"})
+    rows.append({"symbol": "DUSTUSDT", "lastPrice": "1.0", "quoteVolume": "1000", "count": "1"})
+    rows.append({"symbol": "BTCEUR", "lastPrice": "1.0", "quoteVolume": "9e9", "count": "1"})  # wrong quote
+    return rows
+
+
+def test_universe_debug_counts_rejected_reasons(monkeypatch):
+    import asyncio
+    import market.universe as U
+    monkeypatch.setattr(U, "_http_get_json", lambda url, params, timeout=12.0: _fake_rest_rows())
+    h = _hub()
+    asyncio.run(h._refresh())
+    dbg = h.debug()
+    assert dbg["raw_binance_tickers_count"] == 309
+    assert dbg["eligible_symbols_count"] == 305
+    assert dbg["final_universe_count"] == 300           # capped at limit, not 66
+    assert dbg["capped_by_limit"] == 5
+    assert dbg["excluded_stable_count"] == 1
+    assert dbg["excluded_leverage_count"] == 1
+    assert dbg["excluded_low_volume_count"] == 1
+    assert dbg["quote_mismatch_count"] == 1             # BTCEUR
+    assert "USDC/USDT" in dbg["rejected_examples"]["stable"]
+
+
+def test_universe_cache_returns_previous_snapshot_on_refresh_failure(monkeypatch):
+    import asyncio
+    import market.universe as U
+    monkeypatch.setattr(U, "_http_get_json", lambda url, params, timeout=12.0: _fake_rest_rows())
+    h = _hub()
+    asyncio.run(h._refresh())
+    good = h.universe()
+    assert len(good) == 300
+
+    def boom(*a, **k):
+        raise ConnectionError("binance down")
+    monkeypatch.setattr(U, "_http_get_json", boom)
+    asyncio.run(h._refresh())
+    # Snapshot is preserved verbatim, not blanked, on a transient failure.
+    assert h.universe() == good
+    assert h.debug()["last_error"] == "binance down"
