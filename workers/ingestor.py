@@ -9,6 +9,9 @@ from collectors.binance import BinanceCollector
 from collectors.kraken import KrakenCollector
 from collectors.coinbase import CoinbaseCollector
 from models.canonical import TradeTick, BBOTick
+from metrics import (
+    start_metrics_server, market_events_total, queue_depth, db_write_latency_ms,
+)
 
 logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL.upper(), "INFO"))
 logger = logging.getLogger(__name__)
@@ -19,12 +22,14 @@ bbo_queue: asyncio.Queue = asyncio.Queue(maxsize=50000)
 def handle_trade(trade: TradeTick):
     try:
         trade_queue.put_nowait(trade)
+        market_events_total.labels(exchange=trade.exchange_code, kind="trade").inc()
     except asyncio.QueueFull:
         logger.warning("Trade queue full, dropping event")
 
 def handle_bbo(bbo: BBOTick):
     try:
         bbo_queue.put_nowait(bbo)
+        market_events_total.labels(exchange=bbo.exchange_code, kind="bbo").inc()
     except asyncio.QueueFull:
         logger.warning("BBO queue full, dropping event")
 
@@ -34,7 +39,9 @@ def sync_db_write(trades: List[TradeTick], bbos: List[BBOTick]):
     # We will instantiate writer per thread execution for safety, or keep a thread-local one.
     writer = DatabaseWriter()
     try:
+        t0 = time.time()
         writer.write_batch(trades, bbos)
+        db_write_latency_ms.observe((time.time() - t0) * 1000.0)
     finally:
         writer.close()
 
@@ -46,7 +53,10 @@ async def db_writer_loop():
 
     while True:
         now = time.time()
-        
+
+        queue_depth.labels(queue="trade").set(trade_queue.qsize())
+        queue_depth.labels(queue="bbo").set(bbo_queue.qsize())
+
         # Drain queues opportunistically
         while len(trades_buffer) < settings.BATCH_MAX_ROWS:
             try:
@@ -80,7 +90,9 @@ async def db_writer_loop():
 
 async def main():
     logger.info("Initializing Live Ingestor...")
-    
+
+    start_metrics_server(settings.METRICS_PORT_INGESTOR, settings.METRICS_ENABLED)
+
     symbols = settings.ACTIVE_SYMBOLS
     
     collectors = []

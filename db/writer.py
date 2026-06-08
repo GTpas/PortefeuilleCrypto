@@ -5,6 +5,7 @@ import psycopg2
 from psycopg2.extras import execute_values
 from config import settings
 from models.canonical import TradeTick, BBOTick
+from metrics import rows_written_total, dlq_total
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,10 @@ class DatabaseWriter:
             flush_trades(self.conn, trades)
             flush_bbos(self.conn, bbos)
             self.conn.commit()
+            if trades:
+                rows_written_total.labels(table="trade_tick").inc(len(trades))
+            if bbos:
+                rows_written_total.labels(table="bbo_tick").inc(len(bbos))
         except Exception as e:
             self.conn.rollback()
             logger.error(f"Database write failed: {e}. Writing to DLQ...")
@@ -95,8 +100,10 @@ class DatabaseWriter:
             # In a real prod environment, we might retry individually or binary search the failing row.
             for t in trades:
                 write_to_dlq(self.conn, e.__class__.__name__, str(e), t.payload, t.exchange_code, t.symbol, t.event_uid, t.source_channel)
+                dlq_total.labels(channel="trade_tick").inc()
             for b in bbos:
                 write_to_dlq(self.conn, e.__class__.__name__, str(e), b.payload, b.exchange_code, b.symbol, b.event_uid, b.source_channel)
+                dlq_total.labels(channel="bbo_tick").inc()
 
     def close(self):
         self.conn.close()

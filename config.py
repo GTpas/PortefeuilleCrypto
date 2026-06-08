@@ -30,6 +30,16 @@ class Settings(BaseSettings):
     # Redis
     REDIS_URL: str = Field(default="redis://localhost:6379/0", description="Redis connection URL for queue/cache")
 
+    # Decision safety
+    MAX_DATA_AGE_S: int = Field(default=30, description="Max age (seconds) of latest market quote before the risk engine blocks trading (data_stale gate)")
+
+    # Observability — Prometheus metrics HTTP ports (one per worker process)
+    METRICS_ENABLED: bool = Field(default=True, description="Expose Prometheus metrics from workers")
+    METRICS_PORT_INGESTOR: int = Field(default=9101)
+    METRICS_PORT_FEATURE: int = Field(default=9102)
+    METRICS_PORT_SOCIAL: int = Field(default=9103)
+    METRICS_PORT_BOT: int = Field(default=9104)
+
     # Logging
     LOG_LEVEL: str = Field(default="INFO")
 
