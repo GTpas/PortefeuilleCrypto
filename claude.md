@@ -120,6 +120,99 @@ python scripts/dev_supervisor.py
 ### Tests
 `pytest -q` (offline, pas de DB requise) : `test_scorer_thresholds`, `test_social_availability` (garde-fous anti-mock), `test_process_supervisor` (capture stdout/stderr + crash + traceback sur **vrais** subprocess), `test_engine_decimal`.
 
+## Gestion automatique des terminaux par Claude
+
+### Objectif
+Claude doit pouvoir lancer, superviser et gérer **automatiquement** tous les processus du stack local, sans demander à l'utilisateur d'ouvrir plusieurs terminaux. Une **commande unique** démarre et supervise l'ensemble :
+
+```bash
+python scripts/dev_supervisor.py
+```
+
+Le superviseur capture les logs stdout/stderr, détecte les tracebacks Python, classe les niveaux, relance les process autorisés avec backoff, expose un état temps réel (HTTP + WS) et persiste les incidents. Implémentation réelle :
+- **`workers/process_supervisor.py`** — cœur réutilisable et testé (cycle de vie, capture des flux, classification, incidents). Source unique de vérité de l'état des process.
+- **`scripts/dev_supervisor.py`** — entrypoint : construit la liste des process **uniquement à partir des fichiers réellement présents sur disque** (`_exists(...)`, jamais de worker supposé) et sert l'**Ops API** sur `:8050`.
+
+### Processus lancés automatiquement
+Liste **réelle**, vérifiée par rapport au disque (`scripts/dev_supervisor.build_specs()`). Tous les fichiers existent. Les process sont lancés dans cet ordre ; les `oneshot` sont attendus jusqu'à complétion avant la suite.
+
+| Process | Commande | Type | Optionnel | Auto-restart |
+|---|---|---|---|---|
+| `docker` | `docker compose up -d` | oneshot | oui (si compose présent) | non |
+| `bootstrap` | `python -m workers.bootstrap` | oneshot | non | non |
+| `ingestor` | `python -m workers.ingestor` | long-running | non | oui |
+| `aggregator` | `python -m workers.aggregator` | long-running | non | oui |
+| `feature_worker` | `python -m workers.feature_worker` | long-running | non | oui |
+| `social_ingestor` | `python -m workers.social_ingestor` | long-running | non | oui |
+| `antigravity_bot` | `python -m workers.antigravity_bot` | long-running | non | oui |
+| `api` | `python -m uvicorn api.main:app --host 127.0.0.1 --port 8000` | long-running | non | oui |
+
+Notes de vérité (ne pas s'en écarter) :
+- **Pas de process frontend séparé.** Le cockpit est servi par l'API elle-même (`api/main.py` monte `StaticFiles` sur `/` au port 8000). Ne **jamais** lancer `python -m http.server 8000` — cela entrerait en conflit avec l'API sur le même port.
+- **`--reload` est volontairement omis** sous supervision pour que le PID suivi soit le vrai serveur, pas le process reloader parent.
+- **`social_ingestor`** tourne mais ne produit de la donnée *réelle* que si une vraie source est branchée ; avec `ENABLE_MOCK_SOCIAL=False` (défaut) il n'émet rien de réel (voir règle anti-mock PR2).
+- Règle absolue : **ne pas inventer de worker** et **ne pas documenter une commande dont le fichier n'existe pas**. Si un fichier est absent, le superviseur le saute silencieusement (`optional`) ou ne l'ajoute pas.
+
+### Capture des logs & erreurs
+`process_supervisor` lit stdout/stderr **ligne par ligne** et classe chaque ligne en `DEBUG/INFO/WARNING/ERROR/CRITICAL` (`detect_level`) :
+- token de niveau explicite prioritaire ; sinon, une ligne stderr ressemblant à une exception → `ERROR`.
+- **Tracebacks Python accumulés** : du header `Traceback (most recent call last):` jusqu'à la ligne de résumé d'exception (`TypeError`, `ValueError`, `ConnectionError`, `asyncpg.*Error`, `*Exception`, `*Timeout`…), flushés en un seul `last_traceback` structuré.
+- Chaque process garde `last_log`, `last_log_level`, `last_traceback`, `recent_logs` (200 dernières lignes), `restarts`, `pid`, `uptime`.
+
+### Incidents (format réel)
+Au-delà des logs, le superviseur émet un **incident structuré** (crash, autorestart, spawn échoué, crash-loop). Il est **persisté** dans `logs/ops_incidents.jsonl`, diffusé sur `/ws/ops`, et passé au hook `ProcessSupervisor.on_incident` (point d'extension webhook/Claude — jamais d'incident fabriqué). Schéma réel émis par `_raise_incident` :
+
+```json
+{
+  "incident_id": "inc-<process>-<seq>-<ts>",
+  "severity": "warning | error | critical",
+  "process": "antigravity_bot",
+  "symbol": null,
+  "started_at": 0,
+  "last_seen_at": 0,
+  "error_type": "TypeError",
+  "exit_code": 1,
+  "traceback": "...",
+  "recent_logs": ["...20 dernières lignes..."],
+  "health_status": {"status": "crashed", "restarts": 2},
+  "market_data_freshness": null,
+  "suspected_root_cause": "...",
+  "recommended_action": "..."
+}
+```
+
+Quand Claude résume un incident à l'utilisateur, il en dérive une vue courte (`process`, `severity`, `error_type`, `message`, `impact`, `recommended_fix`) **sans jamais masquer l'erreur ni la fabriquer** — la source reste l'incident persisté ci-dessus.
+
+### Règles de redémarrage (valeurs réelles, configurables via `.env`)
+- Auto-restart d'un process crashé **si `autorestart=True`**.
+- **Budget glissant** : max `OPS_MAX_RESTARTS` (défaut **5**) crashs dans une fenêtre `OPS_RESTART_WINDOW_S` (défaut **120 s**).
+- **Backoff exponentiel** avant relance : `delay = min(30 s, 1 s × 2^restarts)` → 1, 2, 4, 8, 16, puis plafond 30 s. *(Ce ne sont pas des paliers fixes 2/5/10 s.)*
+- Au-delà du budget → statut **`degraded`** + incident **critical**, l'auto-restart s'arrête (pas de boucle infinie).
+- Statuts possibles d'un process : `pending | starting | running | stopped | crashed | degraded | completed`.
+- **Ne jamais masquer une erreur** : elle est journalisée, diffusée sur le WS et affichée dans le cockpit.
+- **Ne jamais faire de modification destructive** (suppression de données, reset DB) sans validation explicite de l'utilisateur.
+
+### Ops API & WebSocket (port 8050)
+Aucun shell brut n'est exposé — uniquement ces actions contrôlées (`config.OPS_HOST`/`OPS_PORT`) :
+- `GET /api/ops/status` · `GET /api/ops/health` · `GET /api/ops/processes`
+- `GET /api/ops/events?limit&level&process` · `GET /api/ops/incidents?limit`
+- `POST /api/ops/process/{start|stop|restart}` — body `{"name": "<process>"}`
+- `POST /api/ops/frontend-error` — funnel des erreurs JS du cockpit vers le superviseur
+- `WS /ws/ops` — flux temps réel ; types d'événements : `snapshot` (état initial), `log`, `status`, `incident`
+
+Chaîne temps réel :
+```text
+process stdout/stderr → ProcessSupervisor → Ops API (:8050) → /ws/ops → panneau cockpit « Ops / Terminals » → résumé d'incident Claude
+```
+
+### Cockpit — panneau « 🖥 Ops / Terminals »
+Servi par le cockpit (header), il lit l'Ops API (`window.OPS_URL`, défaut `http://<host>:8050`) et affiche par process : **nom · statut · PID · uptime · nombre de restarts · dernier log · dernier traceback**, des boutons **start / stop / restart**, des logs temps réel **filtrables (process + niveau)**, et un badge `Ops n/m` en header.
+
+### Règle Claude (obligatoire)
+- Claude **ne doit pas** demander à l'utilisateur d'ouvrir manuellement 4–5 terminaux : un superviseur existe (`python scripts/dev_supervisor.py`).
+- Privilégier dans l'ordre : (1) la **commande unique** de lancement ; (2) la **supervision centralisée** ; (3) la **capture automatique des logs** ; (4) une **remontée claire des erreurs/incidents** ; (5) cette documentation maintenue à jour.
+- Toute action sur les process passe par l'Ops API contrôlée — jamais par un shell brut non supervisé.
+
 ## Politique sources
 Sources prioritaires:
 1. code existant
