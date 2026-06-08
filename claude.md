@@ -139,5 +139,49 @@ Une tâche est considérée terminée seulement si:
 **À la fin de chaque conversation ayant produit des modifications de fichiers** :
 1. `git add` sur tous les fichiers modifiés/créés liés à la tâche (pas de `git add -A` global).
 2. `git commit -m "feat/fix/chore: <résumé concis en une ligne>"` — message en français ou anglais, cohérent avec l’historique du repo.
-3. Si un remote est configuré : `git push` (confirmer avec l’utilisateur si c’est la première fois ou si la branche est protégée).
+3. Si un remote est configuré : `git push origin main` — voir **## Git workflow obligatoire** (push immédiat, sans confirmation, jamais de `force push`).
 4. Signaler les fichiers volontairement exclus du commit (secrets, temporaires, artefacts de build).
+
+## Git workflow obligatoire
+
+Après chaque modification réelle du projet, Claude doit automatiquement faire un commit et un push.
+
+Procédure obligatoire après chaque changement :
+
+1. Vérifier les fichiers modifiés :
+
+```bash
+git status
+```
+
+2. Ajouter uniquement les fichiers liés au changement effectué :
+
+```bash
+git add <fichiers_modifiés_liés_au_changement>
+```
+
+3. Créer un commit clair et ciblé :
+
+```bash
+git commit -m "type: description courte du changement"
+```
+
+4. Pousser immédiatement sur le remote :
+
+```bash
+git push origin main
+```
+
+Règles importantes :
+
+- Ne jamais faire de commit global aveugle avec `git add .` sauf si tous les fichiers modifiés sont explicitement liés au changement.
+- Ne jamais inclure les fichiers temporaires, rapports locaux, fichiers non liés ou fichiers générés inutilement.
+- Ne jamais faire de `force push`.
+- Si le push est rejeté, arrêter l’action et afficher l’erreur.
+- Si des fichiers non liés sont déjà modifiés avant l’intervention, les laisser hors commit.
+- Chaque commit doit correspondre à un changement logique clair.
+- Après chaque push, confirmer :
+  - le hash du commit ;
+  - les fichiers inclus ;
+  - que le push est passé ;
+  - que le repo distant est synchronisé.
