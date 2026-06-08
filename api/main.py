@@ -99,13 +99,15 @@ async def get_watchlist():
         async with pool.acquire() as conn:
             results = []
             for symbol in settings.ACTIVE_SYMBOLS:
-                # Latest signal score
+                # Latest signal score (+ whether social was real for that snapshot)
                 sig = await conn.fetchrow("""
-                    SELECT s_social, s_market, s_risk, s_total, action_proposed,
-                           confidence_score, reason_code, quality_grade
-                    FROM decision_snapshot
-                    WHERE symbol = $1
-                    ORDER BY ts_eval DESC
+                    SELECT ds.s_social, ds.s_market, ds.s_risk, ds.s_total, ds.action_proposed,
+                           ds.confidence_score, ds.reason_code, ds.quality_grade,
+                           COALESCE(sqa.has_sufficient_social, FALSE) AS social_available
+                    FROM decision_snapshot ds
+                    LEFT JOIN signal_quality_audit sqa ON sqa.decision_snapshot_id = ds.id
+                    WHERE ds.symbol = $1
+                    ORDER BY ds.ts_eval DESC
                     LIMIT 1
                 """, symbol)
 
@@ -128,6 +130,7 @@ async def get_watchlist():
                     "confidence_score": float(sig['confidence_score']) if sig and sig['confidence_score'] else None,
                     "reason_code": sig['reason_code'] if sig and sig['reason_code'] else None,
                     "quality_grade": sig['quality_grade'] if sig and sig['quality_grade'] else None,
+                    "social_available": bool(sig['social_available']) if sig else False,
                 })
 
             # Sort by S_total descending
@@ -146,11 +149,13 @@ async def get_signals():
             results = []
             for symbol in settings.ACTIVE_SYMBOLS:
                 sig = await conn.fetchrow("""
-                    SELECT s_social, s_market, s_risk, s_total, ts_eval,
-                           action_proposed, confidence_score, reason_code, quality_grade
-                    FROM decision_snapshot
-                    WHERE symbol = $1
-                    ORDER BY ts_eval DESC
+                    SELECT ds.s_social, ds.s_market, ds.s_risk, ds.s_total, ds.ts_eval,
+                           ds.action_proposed, ds.confidence_score, ds.reason_code, ds.quality_grade,
+                           COALESCE(sqa.has_sufficient_social, FALSE) AS social_available
+                    FROM decision_snapshot ds
+                    LEFT JOIN signal_quality_audit sqa ON sqa.decision_snapshot_id = ds.id
+                    WHERE ds.symbol = $1
+                    ORDER BY ds.ts_eval DESC
                     LIMIT 1
                 """, symbol)
 
@@ -166,6 +171,7 @@ async def get_signals():
                         "confidence_score": float(sig['confidence_score']) if sig['confidence_score'] else None,
                         "reason_code": sig.get('reason_code'),
                         "quality_grade": sig.get('quality_grade'),
+                        "social_available": bool(sig['social_available']),
                     })
             return results
     except Exception as e:
@@ -241,7 +247,9 @@ async def get_decision_detail(decision_id: int):
                 ORDER BY ts_eval DESC LIMIT 1
             """, decision_id)
 
-            # Evidence links
+            # Evidence links — REAL sources only. Mock/simulated content
+            # (tracked_source.name LIKE 'mock%') is never surfaced as evidence,
+            # so fabricated authors/tweets cannot reach the drilldown.
             evidence = await conn.fetch("""
                 SELECT del.raw_content_id, del.relevance_score,
                        rc.raw_payload, rc.published_at, rc.source_url,
@@ -251,6 +259,7 @@ async def get_decision_detail(decision_id: int):
                 LEFT JOIN tracked_source ts ON ts.id = rc.source_id
                 LEFT JOIN tracked_actor ta ON ta.id = rc.actor_id
                 WHERE del.decision_snapshot_id = $1
+                  AND COALESCE(ts.name, '') NOT ILIKE 'mock%'
                 ORDER BY del.relevance_score DESC
                 LIMIT 20
             """, decision_id)
@@ -279,6 +288,9 @@ async def get_decision_detail(decision_id: int):
                     }
                     for f in factors
                 ],
+                # Top-level flag the frontend uses to decide whether to render the
+                # social sub-score as a real number or as "n/a (unavailable)".
+                "social_available": bool(audit['has_sufficient_social']) if audit else False,
                 "quality_audit": {
                     "social_sources_count": audit['social_sources_count'] if audit else 0,
                     "has_sufficient_social": audit['has_sufficient_social'] if audit else False,
@@ -347,6 +359,7 @@ async def get_sources_for_symbol(symbol: str, limit: int = 50):
                 LEFT JOIN tracked_source ts ON ts.id = rc.source_id
                 LEFT JOIN tracked_actor ta ON ta.id = rc.actor_id
                 WHERE ce.entity_value = $1 AND ce.entity_type = 'asset'
+                  AND COALESCE(ts.name, '') NOT ILIKE 'mock%'
                 ORDER BY rc.published_at DESC
                 LIMIT $2
             """, base_asset, limit)
@@ -468,6 +481,50 @@ async def get_system_logs(limit: int = 100):
     except Exception as e:
         return {"error": str(e)}
 
+# ── Health / Freshness ──────────────────────
+
+@app.get("/api/health")
+async def get_health():
+    """
+    Real system health: DB connectivity + per-symbol market-data freshness.
+    Used by the cockpit to flag STALE markets and (later) by the Ops panel.
+    Never returns fabricated values — a missing series reports age = null / stale.
+    """
+    max_age_ms = settings.MAX_DATA_AGE_S * 1000
+    db_status = "down"
+    symbols = []
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute("SELECT 1")
+            db_status = "up"
+            rows = await conn.fetch("""
+                SELECT DISTINCT ON (symbol) symbol, bucket_start,
+                       EXTRACT(EPOCH FROM (now() - bucket_start)) * 1000 AS age_ms
+                FROM ohlcv_1s
+                WHERE symbol = ANY($1::text[])
+                ORDER BY symbol, bucket_start DESC
+            """, settings.ACTIVE_SYMBOLS)
+            seen = {r['symbol']: r for r in rows}
+            for sym in settings.ACTIVE_SYMBOLS:
+                r = seen.get(sym)
+                age = float(r['age_ms']) if r and r['age_ms'] is not None else None
+                symbols.append({
+                    "symbol": sym,
+                    "last_ohlcv_age_ms": age,
+                    "last_ohlcv_ts": r['bucket_start'].isoformat() if r else None,
+                    "status": "no_data" if age is None else ("stale" if age > max_age_ms else "fresh"),
+                })
+    except Exception as e:
+        return {"status": "degraded", "db_status": db_status, "error": str(e), "symbols": symbols}
+
+    any_fresh = any(s["status"] == "fresh" for s in symbols)
+    return {
+        "status": "ok" if (db_status == "up" and any_fresh) else "degraded",
+        "db_status": db_status,
+        "max_data_age_ms": max_age_ms,
+        "symbols": symbols,
+    }
+
 # ── In-App Documentation ────────────────────
 
 @app.get("/api/docs/signals-sentiments")
@@ -526,13 +583,15 @@ S_total = 0.45 × SOC + 0.45 × MKT + 0.10 × (2 × RSK - 1)
 
 ## Seuils de décision
 
+> `S_total ∈ [-1, +1]`, seuils **symétriques autour de 0**. Un score neutre = **HOLD**. Tout risk gate actif force **HOLD**.
+
 | S_total | Action | Signification |
 |---------|--------|---------------|
-| ≥ 0.80 | **Reinforce** | Renforcer la position existante |
-| ≥ 0.65 | **Buy** | Ouvrir une nouvelle position |
-| 0.35 – 0.65 | **Hold** | Maintenir ou observer |
-| < 0.35 | **Reduce** | Réduire la position |
-| < 0.15 | **Exit** | Sortir complètement |
+| ≥ +0.60 | **Reinforce** | Renforcer la position existante |
+| ≥ +0.30 | **Buy** | Ouvrir une nouvelle position |
+| −0.30 – +0.30 | **Hold** | Maintenir ou observer |
+| ≤ −0.30 | **Reduce** | Réduire la position |
+| ≤ −0.60 | **Exit** | Sortir complètement |
 
 ---
 
@@ -640,7 +699,8 @@ async def websocket_endpoint(websocket: WebSocket, symbol: str):
         while True:
             async with pool.acquire() as conn:
                 record = await conn.fetchrow("""
-                    SELECT bucket_start, open, high, low, close, volume_base
+                    SELECT bucket_start, open, high, low, close, volume_base,
+                           EXTRACT(EPOCH FROM (now() - bucket_start)) * 1000 AS age_ms
                     FROM ohlcv_1s
                     WHERE symbol = $1
                     ORDER BY bucket_start DESC
@@ -648,8 +708,13 @@ async def websocket_endpoint(websocket: WebSocket, symbol: str):
                 """, symbol)
 
                 if record:
+                    age_ms = float(record['age_ms']) if record['age_ms'] is not None else None
                     candle_data = {
                         "type": "candle",
+                        # Freshness so the UI can drop the LIVE badge and flag STALE
+                        # when the latest candle stops advancing.
+                        "data_age_ms": age_ms,
+                        "stale": age_ms is not None and age_ms > settings.MAX_DATA_AGE_S * 1000,
                         "data": {
                             "time": int(record['bucket_start'].timestamp()),
                             "open": float(record['open']),

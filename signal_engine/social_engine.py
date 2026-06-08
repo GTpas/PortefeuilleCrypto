@@ -52,6 +52,34 @@ class SocialEngine:
         
         async with self.db_pool.acquire() as conn:
             now = datetime.now(timezone.utc)
+            five_min_ago = now - timedelta(minutes=5)
+
+            # ── 0. Availability gate ─────────────
+            # Count REAL (non-mock) recent content for this asset. With zero
+            # content the downstream normalizers would fabricate a spurious
+            # bearish score (normalize(0, 0, 4) == -1), so we short-circuit and
+            # report the signal as unavailable instead of inventing one.
+            content_count = await conn.fetchval("""
+                SELECT COUNT(*)
+                FROM content_entity ce
+                JOIN raw_content rc ON rc.id = ce.raw_content_id
+                LEFT JOIN tracked_source ts ON ts.id = rc.source_id
+                WHERE ce.entity_value = $1 AND ce.entity_type = 'asset'
+                  AND rc.published_at >= $2
+                  AND COALESCE(ts.name, '') NOT ILIKE 'mock%'
+            """, base_asset, five_min_ago) or 0
+
+            if content_count == 0:
+                return {
+                    "score": 0.0,
+                    "available": False,
+                    "factors": [
+                        {"name": "social_unavailable", "value": 0.0, "contrib": 0.0,
+                         "explanation": "No real social feed configured — social signal unavailable"}
+                    ],
+                    "metrics": {"social_available": False, "data_age_ms": -1.0},
+                    "source_breakdown": {},
+                }
 
             # ── 1. Mention Velocity ──────────────
             mention_velocity_z = await self._compute_mention_velocity(conn, base_asset, now)
@@ -139,8 +167,11 @@ class SocialEngine:
             "data_age_ms": round(data_age_ms, 1),
         }
 
+        metrics["social_available"] = True
+
         return {
             "score": s_social,
+            "available": True,
             "factors": factors,
             "metrics": metrics,
             "source_breakdown": source_breakdown,

@@ -135,20 +135,36 @@ class SignalEngine:
         market_factors = market_res["factors"]
         market_features = market_res.get("features")
 
-        # 2. Social Score (real, from SocialEngine)
+        # 2. Social Score (real, from SocialEngine).
+        # social_quality ∈ {"real", "unavailable", "fallback"}:
+        #   real        → computed from genuine social content
+        #   unavailable → no real feed configured (neutral 0.0, NOT presented as real)
+        #   fallback    → engine error (neutral 0.0)
+        missing_features: List[str] = []
         try:
             social_res = await self.social_engine.compute_social_score(symbol)
-            s_social = social_res["score"]
-            social_factors = social_res["factors"]
-            social_quality = "real"
+            if social_res.get("available"):
+                s_social = social_res["score"]
+                social_factors = social_res["factors"]
+                social_quality = "real"
+            else:
+                # No real social feed: neutral contribution, explicitly flagged.
+                s_social = 0.0
+                social_factors = social_res.get("factors") or [
+                    {"name": "social_unavailable", "value": 0.0, "contrib": 0.0,
+                     "explanation": "No real social feed configured — social signal unavailable"}
+                ]
+                social_quality = "unavailable"
+                missing_features.append("s_social")
         except Exception as e:
             logger.warning(f"Social engine failed for {symbol}, falling back to neutral: {e}")
             s_social = 0.0
             social_factors = [
                 {"name": "social_unavailable", "value": 0.0, "contrib": 0.0,
-                 "explanation": "Social data unavailable, using neutral fallback"}
+                 "explanation": "Social engine error — neutral fallback"}
             ]
             social_quality = "fallback"
+            missing_features.append("s_social")
 
         # 3. Risk Score (real, from RiskEngine)
         if portfolio_state is None:
@@ -192,12 +208,24 @@ class SignalEngine:
         # Determine quality grade
         quality_grade = "full"
         degradation_reasons = []
-        if social_quality == "fallback":
-            quality_grade = "degraded"
+        if social_quality in ("unavailable", "fallback"):
+            quality_grade = "partial"
             degradation_reasons.append("social_data_unavailable")
         if market_features is None:
-            quality_grade = "partial" if quality_grade == "full" else "degraded"
+            quality_grade = "degraded"
             degradation_reasons.append("market_features_unavailable")
+            missing_features.append("s_market")
+
+        # Honest data-quality summary surfaced to the API/UI so the cockpit can
+        # show which sub-scores are real vs neutral-because-missing.
+        data_quality = {
+            "social": social_quality,          # real | unavailable | fallback
+            "market": "real" if market_features is not None else "unavailable",
+            "grade": quality_grade,             # full | partial | degraded
+            "social_available": social_quality == "real",
+            "market_available": market_features is not None,
+            "missing_features": missing_features,
+        }
 
         # Log to database for traceability
         async with self.db_pool.acquire() as conn:
@@ -261,6 +289,9 @@ class SignalEngine:
             "reason_code": reason_code,
             "confidence_score": confidence_score,
             "quality_grade": quality_grade,
+            "data_quality": data_quality,
+            "missing_features": missing_features,
+            "social_available": social_quality == "real",
             "risk_gates": risk_gates,
             "snapshot_id": snapshot_id,
             "tradeable": risk_res["tradeable"],

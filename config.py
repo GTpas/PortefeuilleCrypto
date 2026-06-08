@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     ENABLE_L2_BOOK: bool = Field(default=False, description="Whether to ingest level 2 full order book (Warning: high volume)")
     ENABLE_COINGECKO: bool = Field(default=False, description="Whether to run CoinGecko enrichment worker")
     ENABLE_DEX: bool = Field(default=False, description="Whether to enable DEX (Uniswap) ingestion")
+    # Social data is MOCK ONLY today. Disabled by default so the cockpit never
+    # presents fabricated tweets/authors/scores as real. Set to True ONLY for
+    # local development of the social pipeline — content is always tagged mock
+    # and the API filters it out of evidence/scores regardless.
+    ENABLE_MOCK_SOCIAL: bool = Field(default=False, description="Run the simulated social collector (DEV ONLY — never present its output as real data)")
 
     # Redis
     REDIS_URL: str = Field(default="redis://localhost:6379/0", description="Redis connection URL for queue/cache")
