@@ -39,7 +39,17 @@ class PaperExecutionEngine:
                 "initial_capital": float(portfolio['initial_capital']),
                 "current_cash": float(portfolio['current_cash']),
                 "total_value": float(portfolio['total_value']),
-                "positions": [dict(p) for p in positions]
+                # Normalize NUMERIC columns (asyncpg returns Decimal) to float at the
+                # boundary so downstream arithmetic never mixes float/Decimal.
+                "positions": [
+                    {
+                        **dict(p),
+                        "qty": float(p['qty']),
+                        "average_entry_price": float(p['average_entry_price']),
+                        "unrealized_pnl": float(p['unrealized_pnl']) if p['unrealized_pnl'] is not None else 0.0,
+                    }
+                    for p in positions
+                ]
             }
 
     async def execute_trade(self, symbol: str, exchange_code: str, side: str, 
