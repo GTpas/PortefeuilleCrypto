@@ -272,12 +272,23 @@ def rank_universe(tickers: Iterable[UniverseTicker], *, limit: int,
 
 # ── Async hub (the only part that touches the network) ───────────────────────
 
-def _http_get_json(url: str, params: dict, timeout: float = 12.0):
+def _http_get_json(url: str, params: dict, timeout: float = 6.0):
     if params:
         url = url + "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"User-Agent": "antigravity-cockpit/1.0"})
     with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 (trusted host)
         return json.loads(r.read().decode())
+
+
+def _http_get_json_with_fallbacks(bases: list, path: str, params: dict, timeout: float = 6.0):
+    """Try each base URL in order; raises the last exception if all fail."""
+    last_exc: Exception = RuntimeError("no REST base configured")
+    for base in bases:
+        try:
+            return _http_get_json(f"{base}{path}", params, timeout)
+        except Exception as e:
+            last_exc = e
+    raise last_exc
 
 
 class BinanceUniverseHub:
@@ -300,6 +311,8 @@ class BinanceUniverseHub:
         refresh_seconds: int = 60,
         ws_base: str = "wss://stream.binance.com:9443",
         rest_base: str = "https://api.binance.com",
+        rest_timeout: float = 6.0,
+        rest_fallbacks: Optional[list] = None,
         max_symbols: int = 300,
         stale_ms: int = 15000,
     ) -> None:
@@ -311,6 +324,8 @@ class BinanceUniverseHub:
         self.refresh_seconds = max(10, refresh_seconds)
         self.ws_base = ws_base.rstrip("/")
         self.rest_base = rest_base.rstrip("/")
+        self.rest_timeout = rest_timeout
+        self._rest_bases = [self.rest_base] + [b.rstrip("/") for b in (rest_fallbacks or [])]
         self.max_symbols = max_symbols
         self.stale_ms = stale_ms
 
@@ -419,7 +434,7 @@ class BinanceUniverseHub:
             if self._valid_spot is None:
                 self._valid_spot = await asyncio.to_thread(self._load_valid_spot)
             rows = await asyncio.to_thread(
-                _http_get_json, f"{self.rest_base}/api/v3/ticker/24hr", {}
+                _http_get_json_with_fallbacks, self._rest_bases, "/api/v3/ticker/24hr", {}, self.rest_timeout
             )
         except Exception as e:
             # Keep the previous good snapshot — never blank the universe on a
@@ -492,7 +507,7 @@ class BinanceUniverseHub:
     def _load_valid_spot(self) -> Optional[set[str]]:
         """SPOT + TRADING pairs for the configured quote, from exchangeInfo."""
         try:
-            info = _http_get_json(f"{self.rest_base}/api/v3/exchangeInfo", {})
+            info = _http_get_json_with_fallbacks(self._rest_bases, "/api/v3/exchangeInfo", {}, self.rest_timeout)
         except Exception as e:
             logger.warning("[universe] exchangeInfo failed (no spot filter): %s", e)
             return None

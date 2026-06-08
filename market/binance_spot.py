@@ -650,12 +650,23 @@ class SymbolState:
 
 # ── Async hub (the only part that touches the network) ───────────────────────
 
-def _http_get_json(url: str, params: dict, timeout: float = 8.0):
+def _http_get_json(url: str, params: dict, timeout: float = 6.0):
     if params:
         url = url + "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"User-Agent": "antigravity-cockpit/1.0"})
     with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 (trusted host)
         return json.loads(r.read().decode())
+
+
+def _http_get_json_with_fallbacks(bases: list, path: str, params: dict, timeout: float = 6.0):
+    """Try each base URL in order; raises the last exception if all fail."""
+    last_exc: Exception = RuntimeError("no REST base configured")
+    for base in bases:
+        try:
+            return _http_get_json(f"{base}{path}", params, timeout)
+        except Exception as e:
+            last_exc = e
+    raise last_exc
 
 
 class BinanceSpotHub:
@@ -673,6 +684,9 @@ class BinanceSpotHub:
         candle_interval: str = "1m",
         ws_base: str = "wss://stream.binance.com:9443",
         rest_base: str = "https://api.binance.com",
+        rest_timeout: float = 6.0,
+        rest_fallbacks: Optional[list] = None,
+        max_sync_retries: int = 3,
         depth_limit: int = 100,
         max_age_ms: int = 3000,
         kline_history: int = 500,
@@ -695,6 +709,9 @@ class BinanceSpotHub:
         self.range_intervals = dict(range_intervals or DEFAULT_RANGE_INTERVALS)
         self.ws_base = ws_base.rstrip("/")
         self.rest_base = rest_base.rstrip("/")
+        self.rest_timeout = rest_timeout
+        self._rest_bases = [self.rest_base] + [b.rstrip("/") for b in (rest_fallbacks or [])]
+        self.max_sync_retries = max(1, max_sync_retries)
         self.depth_limit = depth_limit
         self.max_age_ms = max_age_ms
         self.kline_history = kline_history
@@ -865,6 +882,12 @@ class BinanceSpotHub:
     def klines(self, symbol: str) -> list[dict]:
         return list(self._kline_cache.get(symbol, []))
 
+    async def _fetch_rest(self, path: str, params: dict):
+        """Try primary REST base then fallbacks. Raises last exception if all fail."""
+        return await asyncio.to_thread(
+            _http_get_json_with_fallbacks, self._rest_bases, path, params, self.rest_timeout
+        )
+
     async def fetch_klines_range(self, symbol: str, range_key: str) -> dict:
         """
         Fresh REST klines for a chart range (1D/7D/1M/1Y), at the configured
@@ -874,8 +897,8 @@ class BinanceSpotHub:
         interval = range_to_interval(range_key, self.range_intervals)
         limit = klines_limit_for_range(range_key, interval, cap=min(1000, self.max_candles))
         try:
-            rows = await asyncio.to_thread(
-                _http_get_json, f"{self.rest_base}/api/v3/klines",
+            rows = await self._fetch_rest(
+                "/api/v3/klines",
                 {"symbol": to_upper_native(symbol), "interval": interval, "limit": limit},
             )
             return {"symbol": symbol, "range": normalize_range(range_key),
@@ -1100,21 +1123,25 @@ class BinanceSpotHub:
     # — REST init —
     async def _rest_init(self) -> None:
         depth_set = set(self._depth_symbols())
-        for s in self.symbols:
-            st = self.states.get(s)
-            if st is None:
-                continue
-            await self._load_klines(s)
-            # Only seed the order book for symbols that actually receive the depth
-            # stream (memory: no book for non-selected symbols when depth_only_selected).
-            if s in depth_set:
-                await self._sync_order_book(s, st)
-            await self._load_ticker(s)
+        # Klines and tickers are independent: run all in parallel to avoid sequential
+        # timeout stacking (4 symbols × 3 calls × 6s = up to 72s sequential vs ~6s parallel).
+        await asyncio.gather(
+            *(self._load_klines(s) for s in self.symbols if s in self.states),
+            *(self._load_ticker(s) for s in self.symbols if s in self.states),
+            return_exceptions=True,
+        )
+        # Depth snapshots: also parallel since each symbol has its own order-book state.
+        depth_syms = [s for s in self.symbols if s in depth_set and s in self.states]
+        if depth_syms:
+            await asyncio.gather(
+                *(self._sync_order_book(s, self.states[s]) for s in depth_syms),
+                return_exceptions=True,
+            )
 
     async def _load_klines(self, symbol: str) -> None:
         try:
-            rows = await asyncio.to_thread(
-                _http_get_json, f"{self.rest_base}/api/v3/klines",
+            rows = await self._fetch_rest(
+                "/api/v3/klines",
                 {"symbol": to_upper_native(symbol), "interval": self.candle_interval,
                  "limit": self.kline_history},
             )
@@ -1124,8 +1151,8 @@ class BinanceSpotHub:
 
     async def _load_ticker(self, symbol: str) -> None:
         try:
-            d = await asyncio.to_thread(
-                _http_get_json, f"{self.rest_base}/api/v3/ticker/24hr",
+            d = await self._fetch_rest(
+                "/api/v3/ticker/24hr",
                 {"symbol": to_upper_native(symbol)},
             )
             # Only seed if the live stream has not already produced a ticker.
@@ -1135,11 +1162,11 @@ class BinanceSpotHub:
         except Exception as e:
             logger.warning("[binance_spot] 24h ticker init failed for %s: %s", symbol, e)
 
-    async def _sync_order_book(self, symbol: str, st: SymbolState) -> None:
+    async def _sync_order_book(self, symbol: str, st: SymbolState, attempt: int = 1, _inner: int = 0) -> None:
         """Snapshot → drop covered buffered events → apply in order (Binance procedure)."""
         try:
-            snap = await asyncio.to_thread(
-                _http_get_json, f"{self.rest_base}/api/v3/depth",
+            snap = await self._fetch_rest(
+                "/api/v3/depth",
                 {"symbol": to_upper_native(symbol), "limit": self.depth_limit},
             )
             ob = st.order_book
@@ -1149,24 +1176,28 @@ class BinanceSpotHub:
             for ev in sorted(buffered, key=lambda e: e.final_update_id):
                 res = ob.apply_update(ev)
                 if res == "gap":
-                    # snapshot was older than the buffer head — retry once shortly
                     ob.synced = False
-                    await asyncio.sleep(0.5)
-                    return await self._sync_order_book(symbol, st)
+                    if _inner < 2:
+                        await asyncio.sleep(0.5)
+                        return await self._sync_order_book(symbol, st, attempt=attempt, _inner=_inner + 1)
+                    logger.warning("[binance_spot] %s inner gap loop limit reached, depth desync until reconnect", symbol)
+                    break
         except Exception as e:
             logger.warning("[binance_spot] depth snapshot failed for %s: %s", symbol, e)
             st.order_book.synced = False
-            # Drop the (now stale) buffered diffs so memory stays bounded while REST
-            # is failing, and schedule a delayed retry — otherwise synced stays False
-            # forever while @depth events keep arriving.
+            # Drop stale buffered diffs so memory stays bounded while REST is failing.
             self._depth_buffer[symbol] = []
             if not self._stop.is_set():
-                asyncio.create_task(self._retry_sync(symbol, st))
+                asyncio.create_task(self._retry_sync(symbol, st, delay=2.0, attempt=attempt + 1))
 
-    async def _retry_sync(self, symbol: str, st: SymbolState, delay: float = 2.0) -> None:
-        """Delayed order-book resync retry (one in flight per symbol via the
-        not-synced guard) so a persistently failing REST depth call self-heals
-        without spinning or leaking buffered diffs."""
-        await asyncio.sleep(delay)
+    async def _retry_sync(self, symbol: str, st: SymbolState, delay: float = 2.0, attempt: int = 1) -> None:
+        """Depth resync with exponential backoff. Gives up after max_sync_retries to avoid
+        an infinite loop when REST is persistently unavailable; resets on next WS reconnect."""
+        if attempt > self.max_sync_retries:
+            logger.warning("[binance_spot] %s depth resync abandoned after %d attempts (REST unavailable until reconnect)",
+                           symbol, attempt - 1)
+            return
+        backoff = min(delay * (2 ** (attempt - 1)), 30.0)
+        await asyncio.sleep(backoff)
         if not self._stop.is_set() and not st.order_book.synced and symbol in self.states:
-            await self._sync_order_book(symbol, st)
+            await self._sync_order_book(symbol, st, attempt=attempt)

@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     CANDLE_INTERVAL: str = Field(default="1m", description="Binance kline interval for the chart: 1s|1m|5m|15m|1h|4h|1d")
     BINANCE_WS_BASE: str = Field(default="wss://stream.binance.com:9443", description="Binance Spot combined-stream WS base (NOT fstream/futures)")
     BINANCE_REST_BASE: str = Field(default="https://api.binance.com", description="Binance Spot REST base for klines/depth/ticker snapshots")
+    BINANCE_REST_TIMEOUT: float = Field(default=6.0, description="Timeout (s) per Binance REST API call (klines/depth/ticker). Shorter = fail-fast when the primary is blocked")
+    BINANCE_REST_FALLBACKS: list[str] = Field(default=["https://api1.binance.com", "https://api2.binance.com"], description="Fallback Binance REST base URLs tried in order when the primary times out")
+    BINANCE_REST_MAX_SYNC_RETRIES: int = Field(default=3, description="Max order-book depth resync retries before giving up (resets on next WS reconnect)")
     BINANCE_DEPTH_LIMIT: int = Field(default=100, description="REST order-book snapshot depth (5|10|20|50|100|500|1000)")
     BINANCE_LIVE_MAX_AGE_MS: int = Field(default=3000, description="Displayed price counts as LIVE only if a real Binance event arrived within this window (ms); older → STALE")
     # Chart counts as CHART LIVE only if a kline arrived within this window. Klines

@@ -53,6 +53,9 @@ async def lifespan(app: FastAPI):
             candle_interval=initial_interval or settings.CANDLE_INTERVAL,
             ws_base=settings.BINANCE_WS_BASE,
             rest_base=settings.BINANCE_REST_BASE,
+            rest_timeout=settings.BINANCE_REST_TIMEOUT,
+            rest_fallbacks=settings.BINANCE_REST_FALLBACKS,
+            max_sync_retries=settings.BINANCE_REST_MAX_SYNC_RETRIES,
             depth_limit=settings.BINANCE_DEPTH_LIMIT,
             max_age_ms=settings.BINANCE_LIVE_MAX_AGE_MS,
             chart_max_age_ms=settings.CHART_LIVE_MAX_AGE_MS,
@@ -73,6 +76,8 @@ async def lifespan(app: FastAPI):
             refresh_seconds=settings.TRENDING_REFRESH_SECONDS,
             ws_base=settings.BINANCE_WS_BASE,
             rest_base=settings.BINANCE_REST_BASE,
+            rest_timeout=settings.BINANCE_REST_TIMEOUT,
+            rest_fallbacks=settings.BINANCE_REST_FALLBACKS,
             max_symbols=settings.BACKEND_MAX_SYMBOLS,
             stale_ms=settings.UNIVERSE_STALE_MS,
         )
