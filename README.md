@@ -1,84 +1,113 @@
-# Real-time Crypto Market Data Ingestion Pipeline
+# PortefeuilleCrypto — Antigravity Crypto Cockpit
 
-Ce projet implémente une chaîne d'ingestion robuste de données de marché cryptographiques en temps réel (Spot trades, best bid/ask, et bougies OHLCV 1s), comme spécifié dans le rapport de recherche approfondie.
+Système **local** de paper trading crypto, temps réel, explicable et observable.
 
-L'architecture s'appuie sur :
-- **Python (asyncio / websockets)** pour les collecteurs.
-- **PostgreSQL avec TimescaleDB** pour le stockage temporel et l'agrégation continue (bien qu'ici effectuée via un script Python par souci de portabilité).
-- **Docker Compose** pour la base de données.
+Il ingère les données de marché de Binance/Kraken/Coinbase, les stocke dans TimescaleDB, calcule des features de microstructure et un signal social, produit un **score de décision explicable** par actif, exécute des **trades simulés** (paper trading) sous contraintes de risque réelles, et affiche le tout dans un **cockpit temps réel** dont le prix « colle à Binance UI ».
+
+> 🧭 **Pour intervenir vite (Claude / dev)** : [`CLAUDE.md`](CLAUDE.md) + [`docs/`](docs/).
+> 🤝 **Pour contribuer** : [`CONTRIBUTING.md`](CONTRIBUTING.md).
+> Ce README est l'entrée pour **découvrir** le projet.
+
+## Ce que fait le projet
+- **Ingestion temps réel** (WebSocket) : trades + best bid/ask des 3 exchanges, normalisés, écrits par batch idempotent (DLQ en cas d'échec).
+- **Stockage TimescaleDB** : hypertables, bougies OHLCV (1s → agrégats 1m/5m), features de marché, compression + rétention.
+- **Moteur de décision réel** (aucune logique aléatoire) : `S_total = 0.45·social + 0.45·marché + 0.10·(2·risque − 1)`, décomposable et journalisé.
+- **Paper trading** sous règles de risque (8 positions max, 20 %/position, 10 % cash mini, frais 10 bps, slippage dynamique, rejet > 40 bps).
+- **Cockpit** : prix/chart Binance live, univers ~300 cryptos tendances, watchlist, signaux, microstructure, portefeuille, logs, panneau Ops.
+- **Données réelles uniquement** : jamais de mock présenté comme réel — sinon `unavailable`/`n/a` explicite.
+
+Architecture détaillée : [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Prérequis
+- Docker + Docker Compose
+- Python 3.10+
+- ≥ 4 Go RAM, SSD recommandé
 
-- Docker et Docker Compose
-- Python 3.10+ (ou `uv`, ou `venv`)
-- Au moins 4 Go de RAM et un SSD (80 Go NVMe recommandé en production)
+## Installation
+```powershell
+# 1. Infra (PostgreSQL/TimescaleDB + Redis) — migrations jouées au 1er boot
+docker compose up -d
 
-## Installation et démarrage rapide
-
-### 1. Démarrer la base de données (TimescaleDB)
-
-Le fichier `docker-compose.yml` inclut une image TimescaleDB et mappe les scripts d'initialisation.
-
-```bash
-docker-compose up -d
-```
-
-*(Lors du premier lancement, TimescaleDB exécutera le script `db/migrations/001_initial_schema.sql` pour créer les tables et les hypertables.)*
-
-### 2. Configurer l'environnement Python
-
-```bash
+# 2. Environnement Python
 python -m venv venv
-# Sur Windows :
-venv\Scripts\activate
-# Sur Linux/Mac :
-# source venv/bin/activate
-
+.\venv\Scripts\activate            # Windows  (Linux/Mac : source venv/bin/activate)
 pip install -r requirements.txt
 ```
+Configuration optionnelle via `.env` (voir [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)). Par défaut : DB locale, symboles `BTC/USDT`, `ETH/USDT`, `SOL/USDT`.
 
-### 3. Configurer l'application (optionnel)
+## Lancer la stack (recommandé : une seule commande)
 
-Les variables d'environnement peuvent être écrites dans un fichier `.env` à la racine ou exportées. 
-Par défaut, la connexion pointe vers `postgresql://crypto_user:crypto_password@localhost:5432/crypto_market_data` et s'abonne à `BTC/USDT`, `ETH/USDT`, `SOL/USDT`.
-Voir `config.py` pour les valeurs possibles.
+Le **supervisor** démarre et surveille tout (docker + bootstrap + workers + API) :
 
-### 4. Bootstrap des marchés (CCXT)
+```powershell
+$env:PYTHONPATH="."; python .\scripts\dev_supervisor.py
+```
+Ou, sous VS Code : `Terminal → Run Task… → Start Dev Supervisor` (ou **Start Full Stack** pour ouvrir aussi le cockpit). Détails et dépannage : [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
-Ce worker utilise l'API REST de CCXT pour télécharger les métadonnées de Binance, Kraken et Coinbase, et peuple les tables `exchange_ref` et `market_ref`.
+### Ouvrir le dashboard
+- **Cockpit** : http://localhost:8000/
+- **Santé API** : http://localhost:8000/api/health
+- **Ops** : http://localhost:8050/api/ops/health
 
+### Lancer l'API seule
+```powershell
+$env:PYTHONPATH="."; python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
+```
+> ⚠️ Ne **pas** lancer un `http.server` sur 8000 : l'API sert déjà le cockpit (conflit de port).
+
+### Lancer les workers manuellement (sans supervisor)
+```powershell
+$env:PYTHONPATH="."
+python -m workers.bootstrap          # oneshot : peuple market_ref
+python -m workers.ingestor           # collecte WS → trade_tick/bbo_tick
+python -m workers.aggregator         # OHLCV 1s
+python -m workers.feature_worker     # features de marché
+python -m workers.social_ingestor    # social (idle si ENABLE_MOCK_SOCIAL=False)
+python -m workers.antigravity_bot    # décisions + paper trades
+```
+Rôle de chaque worker : [docs/WORKERS.md](docs/WORKERS.md).
+
+## Vérifier que l'ingestion fonctionne
+1. `GET http://localhost:8000/api/health` → `db_status: up`, symboles `fresh`, `binance_live.connected: true`.
+2. Les trades arrivent :
+   ```bash
+   docker exec -it crypto_timescaledb psql -U crypto_user -d crypto_market_data \
+     -c "SELECT exchange_code, symbol, count(*), max(ts_event) FROM trade_tick GROUP BY 1,2;"
+   ```
+   `max(ts_event)` doit avancer.
+3. Cockpit : badge marché passe `Connecting… → Waiting data → Live` (jamais `Live` sans bougie réelle).
+
+## Lire les logs
+- **Cockpit** → panneau **🖥 Ops / Terminals** (temps réel, filtrable).
+- **API** → `GET /api/ops/events`, `GET /api/ops/incidents`, `GET /api/system/logs`.
+- **Docker** → `docker compose logs -f db`.
+- **Incidents** → `logs/ops_incidents.jsonl`.
+
+## Erreurs courantes (extrait)
+| Symptôme | Fix rapide |
+|---|---|
+| `Jeton inattendu « python »` (PowerShell) | utiliser le `;` : `$env:PYTHONPATH="."; python ...` |
+| `Port 8050 déjà occupé` | un supervisor tourne déjà → `.\scripts\stop_all.ps1` |
+| `db_status: down` | `docker compose up -d` ; attendre le healthcheck |
+| Badge jamais `Live` | tester `GET /api/binance/debug/{symbol}` (géo-blocage / WS) |
+| Univers vide / < 300 | `GET /api/market/universe/debug` (souvent `MIN_QUOTE_VOLUME`) |
+| `SOC n/a` | normal : social mock désactivé par défaut (`ENABLE_MOCK_SOCIAL=False`) |
+
+Catalogue complet : [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+
+## Tests
 ```bash
-set PYTHONPATH=.
-python workers/bootstrap.py
+pytest -q        # offline, pas de DB requise
 ```
 
-### 5. Lancer l'ingestion live (WebSockets)
+## Rollback / incident
+Couper l'`ingestor`, inspecter `dead_letter_event`, au besoin `SELECT drop_chunks('trade_tick', newer_than => …)` puis relancer (réécriture sûre grâce à `event_uid` idempotent). Procédure : [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
-Le script principal se connecte aux WebSockets des exchanges configurés, gère la backpressure, et batch les écritures en DB.
-
-```bash
-set PYTHONPATH=.
-python workers/ingestor.py
-```
-
-### 6. Lancer l'agrégateur OHLCV 1s
-
-Un script séparé lit les trades récents et génère des bougies 1 seconde (en production, cela peut tourner en permanence ou être remplacé par une Materialized View TimescaleDB).
-
-```bash
-set PYTHONPATH=.
-python workers/aggregator.py
-```
-
-## Limites connues et Travaux Futurs
-
-- **Résilience avancée** : Le script de base gère les coupures via `backoff` et `websockets`, mais la DLQ (Dead Letter Queue) se contente pour l'instant d'enregistrer l'erreur entière en base si le batch entier échoue, sans le découper au niveau de la ligne en erreur.
-- **Agrégation continue** : Dans une production massive, le worker `aggregator.py` devrait être remplacé par les vues matérialisées natives (Continuous Aggregates) de TimescaleDB.
-- **Monitoring** : Il manque un conteneur Grafana/Prometheus (qui peut être ajouté dans le docker-compose) couplé aux métriques exposées par l'application (à implémenter via `prometheus_client`).
-
-## Plan de Rollback / Incident
-
-En cas de corruption ou si le lag d'ingestion s'accumule trop (ex: base de données hors ligne trop longtemps) :
-1. Couper le worker `ingestor.py`.
-2. Inspecter les tables `dead_letter_event` pour voir les échecs.
-3. Si nécessaire, supprimer les chunks très récents via `SELECT drop_chunks('trade_tick', newer_than => ...);` et relancer l'ingestion depuis le flux live (qui écrasera sans risque grâce à l'`event_uid` idempotent).
+## Ports
+| Service | Port |
+|---|---|
+| API / cockpit | 8000 |
+| Ops supervisor | 8050 |
+| Prometheus workers | 9101–9104 |
+| PostgreSQL/TimescaleDB | 5432 |
+| Redis | 6379 |

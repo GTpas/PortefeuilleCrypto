@@ -10,6 +10,71 @@ PortefeuilleCrypto est un système local de paper trading crypto piloté par:
 
 Le projet doit rester simple à lancer sur une machine locale via Docker, observable, et modulaire.
 
+## 📚 Carte du projet & documentation (lire en premier)
+
+> `CLAUDE.md` = index + règles permanentes (chargé à chaque session). Le détail vit dans [`docs/`](docs/). Pour un humain qui découvre : [`README.md`](README.md). Pour contribuer : [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+| Doc | Quand l'ouvrir |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | vue d'ensemble, **flux de données**, tiers, rôle des dossiers |
+| [docs/API.md](docs/API.md) | endpoints REST + WebSocket |
+| [docs/DATABASE.md](docs/DATABASE.md) | tables, hypertables, migrations, rétention |
+| [docs/WORKERS.md](docs/WORKERS.md) | rôle/entrées/sorties/cadence/métriques de chaque worker |
+| [docs/FRONTEND.md](docs/FRONTEND.md) | cockpit, panneaux, anti-freeze chart, bornes mémoire |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Docker, **variables d'env**, supervisor, ports |
+| [docs/RUNBOOK.md](docs/RUNBOOK.md) | lancer, vérifier, lire les logs, **rollback** |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | problèmes fréquents + fixes |
+| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | bornes mémoire, latence, vigilance perf & **sécurité** |
+| [docs/CHANGELOG_TECH.md](docs/CHANGELOG_TECH.md) | **historique des décisions techniques** |
+
+### Architecture en une vue
+Deux chemins **séparés volontairement** (deux connexions Binance) :
+- **Persistance** (bot + historique) : `collectors → ingestor → db.writer → trade_tick/bbo_tick → aggregator → ohlcv_1s → agrégats continus`. Features : `feature_worker → market_feature_1s`. Décision : `antigravity_bot → scorer (market+social+risk) → decision_* → paper_trade`.
+- **Affichage** (cockpit, « collé à Binance UI ») : hubs in-process dans l'API — `binance_spot.py` (Tier 3 plein détail) + `universe.py` (Tier 1 ≤300, un seul `!ticker@arr`) → `/ws/live`, `/api/market/*`, `/api/binance/*`. Lectures DB d'affichage **pinnées** `DISPLAY_EXCHANGE`.
+- **Ops** : `dev_supervisor → process_supervisor` (Ops API :8050, `/ws/ops`) → panneau 🖥 Ops.
+
+Schéma complet : [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#2-schéma-des-flux-de-données).
+
+### Rôle des dossiers (résumé)
+`collectors/` (WS par exchange) · `models/` (canonical + event_uid) · `db/` (writer batch+DLQ, migrations) · `workers/` (ingestor, aggregator, feature_worker, social_ingestor, antigravity_bot, bootstrap, process_supervisor) · `signal_engine/` (market_features, social_engine, risk_engine, scorer) · `paper_execution/` (engine) · `market/` (hubs binance_spot, universe) · `social/` (base, analyzer, mock) · `api/` (FastAPI + WS + hubs + cockpit statique) · `frontend/` (cockpit) · `scripts/` (supervisor + .ps1) · `tests/` (offline) · `docs/`.
+
+### Repères rapides
+- **Workers** → [docs/WORKERS.md](docs/WORKERS.md). Lancement : `python -m workers.<nom>` (`PYTHONPATH=.`). Ordre supervisé : docker→bootstrap→ingestor→aggregator→feature_worker→social_ingestor→antigravity_bot→api.
+- **Endpoints** → [docs/API.md](docs/API.md). Principaux : `/api/health`, `/api/watchlist`, `/api/signals`, `/api/decision/{id}`, `/api/market/universe`, `/api/binance/debug/{symbol}`, `WS /ws/live/{symbol}`. Ops sur :8050.
+- **Tables** → [docs/DATABASE.md](docs/DATABASE.md). Cœur : `trade_tick`, `bbo_tick`, `ohlcv_1s`, `market_feature_1s`, `decision_snapshot`/`decision_factor`/`signal_quality_audit`, `paper_portfolio`/`paper_position`/`paper_trade`, `portfolio_state`. ⚠️ pas de table `paper_order` (ordres = `paper_trade`).
+- **Variables d'env** → [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). Toutes dans `config.py`/`.env`. Jamais de secret en dur.
+- **Debug** → [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) : 1) `GET /api/health` 2) 🖥 Ops + `/api/ops/incidents` 3) 🔬 Source pour tout écart prix/chart.
+- **Rollback** → [docs/RUNBOOK.md](docs/RUNBOOK.md) : `git revert` ; DLQ + `drop_chunks` pour l'ingestion ; migration inverse (jamais éditer une migration appliquée).
+- **Conventions de nommage** → [CONTRIBUTING.md](CONTRIBUTING.md) : branches `type/sujet`, commits `type: …`, migrations `NNN_desc.sql` idempotentes, symboles canoniques `BASE/QUOTE`.
+- **Perf & sécurité** → [docs/PERFORMANCE.md](docs/PERFORMANCE.md) : bornes mémoire front/back explicites ; binds `127.0.0.1` + CORS `*` = **local only**, ne pas exposer sans durcir.
+- **TODO techniques connus** : voir « ce qui n'est PAS encore final » ci-dessous + `outcome_eval`/`source_influence_snapshot` créées mais non remplies (pas de backtest/crédibilité), `tracked_site`/`tracked_asset_source_map` inutilisées, social = mock-only, aggregator non instrumenté.
+- **Historique des décisions** → [docs/CHANGELOG_TECH.md](docs/CHANGELOG_TECH.md) + sections PR1→PR5 plus bas.
+
+## 🤖 Instructions permanentes pour Claude (documentation)
+
+À **chaque** intervention sur le projet (complète la « Politique Claude » plus bas, orientée doc) :
+- **Lire `CLAUDE.md` avant de modifier le code** (puis le `docs/` concerné).
+- **Mettre à jour `CLAUDE.md`** si l'architecture, les endpoints, les workers, la base, Docker, les scripts ou les commandes changent.
+- **Mettre à jour `/docs`** si un composant documenté est modifié (API→`docs/API.md`, DB→`docs/DATABASE.md`, worker→`docs/WORKERS.md`, Docker/env→`docs/DEPLOYMENT.md`, frontend→`docs/FRONTEND.md`, perf→`docs/PERFORMANCE.md`, bug récurrent→`docs/TROUBLESHOOTING.md`).
+- **Ne jamais laisser un changement technique sans documentation.**
+- **Ajouter une note dans `docs/CHANGELOG_TECH.md`** pour toute modification significative.
+- **Ne pas supprimer une documentation existante sans la remplacer.**
+- **Signaler clairement les zones incertaines** (« à vérifier ») ou les TODO.
+- Le script `scripts/check_docs_sync.py` (hook pre-commit + GitHub Action `docs-check`) signale un changement de code sans mise à jour de doc.
+
+## ✅ Documentation à maintenir à chaque commit
+
+Avant chaque commit :
+- [ ] Le code fonctionne localement.
+- [ ] Les commandes modifiées sont documentées.
+- [ ] Les nouveaux endpoints sont ajoutés dans `docs/API.md`.
+- [ ] Les nouvelles tables ou migrations sont ajoutées dans `docs/DATABASE.md`.
+- [ ] Les nouveaux workers sont ajoutés dans `docs/WORKERS.md`.
+- [ ] Les changements Docker/env sont ajoutés dans `docs/DEPLOYMENT.md`.
+- [ ] Les problèmes connus sont ajoutés dans `docs/TROUBLESHOOTING.md`.
+- [ ] Le résumé technique est ajouté dans `docs/CHANGELOG_TECH.md`.
+- [ ] `CLAUDE.md` reste cohérent avec l'état actuel du projet.
+
 ## État actuel à respecter
 *(Mis à jour le 2026-06-08 après audit du code réel — migrations 001→007.)*
 
