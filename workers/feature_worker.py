@@ -95,19 +95,37 @@ async def run_feature_worker():
 
     feature_cycle = 0
 
+    # Bound the per-cycle compute fan-out. The worker is intentionally scoped to
+    # the small ACTIVE_SYMBOLS core (the 300-symbol universe is display-only and
+    # never reaches this worker), so the default bound is modest; it matters only
+    # if ACTIVE_SYMBOLS is grown. See settings.FEATURE_MAX_CONCURRENCY.
+    sem = asyncio.Semaphore(max(1, settings.FEATURE_MAX_CONCURRENCY))
+    pairs = [(s, e) for s in settings.ACTIVE_SYMBOLS for e in settings.EXCHANGES]
+
+    async def _compute(symbol: str, exchange_code: str):
+        async with sem:
+            try:
+                return await calculator.compute_features(symbol, exchange_code)
+            except Exception as e:
+                logger.error(f"Feature computation error for {symbol}/{exchange_code}: {e}")
+                return None
+
     try:
         while True:
             feature_cycle += 1
 
-            for symbol in settings.ACTIVE_SYMBOLS:
-                for exchange_code in settings.EXCHANGES:
-                    try:
-                        features = await calculator.compute_features(symbol, exchange_code)
-                        if features:
-                            await calculator.write_features(features)
-                            rows_written_total.labels(table="market_feature_1s").inc()
-                    except Exception as e:
-                        logger.error(f"Feature computation error for {symbol}/{exchange_code}: {e}")
+            # Compute all (symbol, exchange) features concurrently (bounded), then
+            # persist them in a single batched round-trip instead of N sequential
+            # INSERTs. Per-pair errors are isolated above and skipped.
+            computed = await asyncio.gather(*[_compute(s, e) for s, e in pairs])
+            features_list = [f for f in computed if f]
+            if features_list:
+                try:
+                    written = await calculator.write_features_many(features_list)
+                    rows_written_total.labels(table="market_feature_1s").inc(written)
+                except Exception as e:
+                    # A failed batch is recovered next cycle (upsert is idempotent).
+                    logger.error(f"Feature batch write error ({len(features_list)} rows): {e}")
 
             worker_last_success_ts.labels(worker="feature_worker").set(time.time())
 

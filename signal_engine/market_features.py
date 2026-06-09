@@ -255,30 +255,51 @@ class MarketFeaturesCalculator:
         annualized = std_dev * (525600 ** 0.5)
         return round(annualized, 6)
 
+    # Idempotent upsert reused by the single- and batch-write paths.
+    _UPSERT_SQL = """
+        INSERT INTO market_feature_1s (
+            ts, symbol, exchange_code,
+            spread_bps, depth_usd_10bps, book_imbalance,
+            trade_pressure, relative_volume, slippage_bps_est,
+            bid_px, ask_px, mid_px
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        ON CONFLICT (ts, symbol, exchange_code)
+        DO UPDATE SET
+            spread_bps = EXCLUDED.spread_bps,
+            depth_usd_10bps = EXCLUDED.depth_usd_10bps,
+            book_imbalance = EXCLUDED.book_imbalance,
+            trade_pressure = EXCLUDED.trade_pressure,
+            relative_volume = EXCLUDED.relative_volume,
+            slippage_bps_est = EXCLUDED.slippage_bps_est,
+            bid_px = EXCLUDED.bid_px,
+            ask_px = EXCLUDED.ask_px,
+            mid_px = EXCLUDED.mid_px
+    """
+
+    @staticmethod
+    def _feature_row(f: Dict[str, Any]) -> tuple:
+        """Positional args for one _UPSERT_SQL row."""
+        return (
+            f['ts'], f['symbol'], f['exchange_code'],
+            f['spread_bps'], f['depth_usd_10bps'], f['book_imbalance'],
+            f['trade_pressure'], f['relative_volume'], f['slippage_bps_est'],
+            f['bid_px'], f['ask_px'], f['mid_px'],
+        )
+
     async def write_features(self, features: Dict[str, Any]) -> None:
-        """Write computed features to market_feature_1s hypertable."""
+        """Write a single computed feature row to market_feature_1s (idempotent)."""
         async with self.db_pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO market_feature_1s (
-                    ts, symbol, exchange_code,
-                    spread_bps, depth_usd_10bps, book_imbalance,
-                    trade_pressure, relative_volume, slippage_bps_est,
-                    bid_px, ask_px, mid_px
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-                ON CONFLICT (ts, symbol, exchange_code)
-                DO UPDATE SET
-                    spread_bps = EXCLUDED.spread_bps,
-                    depth_usd_10bps = EXCLUDED.depth_usd_10bps,
-                    book_imbalance = EXCLUDED.book_imbalance,
-                    trade_pressure = EXCLUDED.trade_pressure,
-                    relative_volume = EXCLUDED.relative_volume,
-                    slippage_bps_est = EXCLUDED.slippage_bps_est,
-                    bid_px = EXCLUDED.bid_px,
-                    ask_px = EXCLUDED.ask_px,
-                    mid_px = EXCLUDED.mid_px
-            """,
-                features['ts'], features['symbol'], features['exchange_code'],
-                features['spread_bps'], features['depth_usd_10bps'], features['book_imbalance'],
-                features['trade_pressure'], features['relative_volume'], features['slippage_bps_est'],
-                features['bid_px'], features['ask_px'], features['mid_px']
-            )
+            await conn.execute(self._UPSERT_SQL, *self._feature_row(features))
+
+    async def write_features_many(self, features_list: List[Dict[str, Any]]) -> int:
+        """Batch-write computed features in one DB round-trip via executemany.
+
+        Idempotent (same ON CONFLICT upsert as write_features). Returns the number
+        of rows written so callers can increment rows_written_total accurately.
+        """
+        if not features_list:
+            return 0
+        rows = [self._feature_row(f) for f in features_list]
+        async with self.db_pool.acquire() as conn:
+            await conn.executemany(self._UPSERT_SQL, rows)
+        return len(rows)

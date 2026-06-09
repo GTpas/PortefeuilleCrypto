@@ -125,6 +125,16 @@ model_score_latency_ms = Histogram(
 )
 paper_orders_total = Counter("paper_orders_total", "Paper trades executed", ["side"])
 
+# ── API (FastAPI request serving) ────────────
+# Per-route latency + (via its _count) request totals, labelled by the matched
+# route template (not the raw path) to keep cardinality bounded. Recorded by the
+# http middleware in api/main.py; exposed on the API's /metrics endpoint.
+api_request_duration_ms = Histogram(
+    "api_request_duration_ms", "API request handling latency (ms)",
+    ["method", "route", "status"],
+    buckets=(1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000),
+)
+
 # ── Worker liveness (generic) ────────────────
 worker_events_processed_total = Counter(
     "worker_events_processed_total", "Events processed by a worker", ["worker"]

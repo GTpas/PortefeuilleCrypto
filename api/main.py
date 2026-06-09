@@ -1,7 +1,8 @@
 import asyncio
 import json
+import time
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import asyncpg
@@ -101,11 +102,40 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Per-route API latency instrumentation. Labels by the matched route *template*
+# (e.g. /api/market-features/{symbol:path}) — never the raw URL — so cardinality
+# stays bounded even with 300-symbol traffic. The histogram's _count also gives
+# request totals per (method, route, status). Exposed on /metrics below.
+from metrics import api_request_duration_ms
+
+
+@app.middleware("http")
+async def _record_request_metrics(request: Request, call_next):
+    start = time.perf_counter()
+    status = 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        return response
+    finally:
+        route = request.scope.get("route")
+        route_label = getattr(route, "path", None) or "unmatched"
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        api_request_duration_ms.labels(
+            method=request.method, route=route_label, status=str(status)
+        ).observe(elapsed_ms)
+
 # Prometheus metrics exposition (shares the default registry with workers
-# running in the same image; harmless if scraped standalone).
+# running in the same image; harmless if scraped standalone). An explicit GET
+# /metrics route — NOT app.mount("/metrics", …) — because the StaticFiles mount
+# at "/" shadows a bare "/metrics" and would 404 the conventional scrape path
+# (only "/metrics/" worked). An exact route is matched before the catch-all mount.
 try:
-    from prometheus_client import make_asgi_app
-    app.mount("/metrics", make_asgi_app())
+    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+
+    @app.get("/metrics")
+    async def metrics_endpoint():
+        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 except Exception as _e:  # pragma: no cover
     pass
 
@@ -160,56 +190,69 @@ async def get_portfolio_history(limit: int = 500):
 
 @app.get("/api/watchlist")
 async def get_watchlist():
-    """Returns all active symbols sorted by composite score (S_total desc)."""
+    """Returns all active symbols sorted by composite score (S_total desc).
+
+    Set-based: one query for the latest decision per symbol + one for the latest
+    DB price (both DISTINCT ON, exchange-pinned), merged in memory — instead of a
+    per-symbol N+1 fan-out (2×N round-trips). Mirrors the /api/health idiom. The
+    real-time Binance hub price still takes precedence over the DB fallback.
+    """
     try:
+        symbols = settings.ACTIVE_SYMBOLS
         async with pool.acquire() as conn:
-            results = []
-            for symbol in settings.ACTIVE_SYMBOLS:
-                # Latest signal score (+ whether social was real for that snapshot)
-                sig = await conn.fetchrow("""
-                    SELECT ds.s_social, ds.s_market, ds.s_risk, ds.s_total, ds.action_proposed,
-                           ds.confidence_score, ds.reason_code, ds.quality_grade,
-                           COALESCE(sqa.has_sufficient_social, FALSE) AS social_available
-                    FROM decision_snapshot ds
-                    LEFT JOIN signal_quality_audit sqa ON sqa.decision_snapshot_id = ds.id
-                    WHERE ds.symbol = $1
-                    ORDER BY ds.ts_eval DESC
-                    LIMIT 1
-                """, symbol)
+            # Latest decision row per symbol (+ whether social was real).
+            sig_rows = await conn.fetch("""
+                SELECT DISTINCT ON (ds.symbol)
+                       ds.symbol, ds.s_social, ds.s_market, ds.s_risk, ds.s_total,
+                       ds.action_proposed, ds.confidence_score, ds.reason_code, ds.quality_grade,
+                       COALESCE(sqa.has_sufficient_social, FALSE) AS social_available
+                FROM decision_snapshot ds
+                LEFT JOIN signal_quality_audit sqa ON sqa.decision_snapshot_id = ds.id
+                WHERE ds.symbol = ANY($1::text[])
+                ORDER BY ds.symbol, ds.ts_eval DESC
+            """, symbols)
+            sig_by_symbol = {r['symbol']: r for r in sig_rows}
 
-                # Latest price — prefer the real-time Binance hub so the watchlist
-                # matches the big displayed number; fall back to Binance-pinned OHLCV.
-                price = None
-                if binance_hub and binance_hub.has_symbol(symbol):
-                    snap = binance_hub.snapshot(symbol)
-                    if snap:
-                        price = snap.get("displayed_price")
-                if price is None:
-                    price_row = await conn.fetchrow("""
-                        SELECT close FROM ohlcv_1s
-                        WHERE symbol = $1 AND exchange_code = 'binance'
-                        ORDER BY bucket_start DESC
-                        LIMIT 1
-                    """, symbol)
-                    price = float(price_row['close']) if price_row else None
+            # Latest DB price per symbol (Binance-pinned fallback).
+            price_rows = await conn.fetch("""
+                SELECT DISTINCT ON (symbol) symbol, close
+                FROM ohlcv_1s
+                WHERE symbol = ANY($1::text[]) AND exchange_code = $2
+                ORDER BY symbol, bucket_start DESC
+            """, symbols, settings.DISPLAY_EXCHANGE)
+            price_by_symbol = {r['symbol']: float(r['close']) for r in price_rows}
 
-                results.append({
-                    "symbol": symbol,
-                    "price": price,
-                    "s_social": float(sig['s_social']) if sig else 0.0,
-                    "s_market": float(sig['s_market']) if sig else 0.0,
-                    "s_risk": float(sig['s_risk']) if sig else 0.5,
-                    "s_total": float(sig['s_total']) if sig else 0.0,
-                    "action_proposed": sig['action_proposed'] if sig else "hold",
-                    "confidence_score": float(sig['confidence_score']) if sig and sig['confidence_score'] else None,
-                    "reason_code": sig['reason_code'] if sig and sig['reason_code'] else None,
-                    "quality_grade": sig['quality_grade'] if sig and sig['quality_grade'] else None,
-                    "social_available": bool(sig['social_available']) if sig else False,
-                })
+        results = []
+        for symbol in symbols:
+            sig = sig_by_symbol.get(symbol)
 
-            # Sort by S_total descending
-            results.sort(key=lambda x: x['s_total'], reverse=True)
-            return results
+            # Latest price — prefer the real-time Binance hub so the watchlist
+            # matches the big displayed number; fall back to Binance-pinned OHLCV.
+            price = None
+            if binance_hub and binance_hub.has_symbol(symbol):
+                snap = binance_hub.snapshot(symbol)
+                if snap:
+                    price = snap.get("displayed_price")
+            if price is None:
+                price = price_by_symbol.get(symbol)
+
+            results.append({
+                "symbol": symbol,
+                "price": price,
+                "s_social": float(sig['s_social']) if sig else 0.0,
+                "s_market": float(sig['s_market']) if sig else 0.0,
+                "s_risk": float(sig['s_risk']) if sig else 0.5,
+                "s_total": float(sig['s_total']) if sig else 0.0,
+                "action_proposed": sig['action_proposed'] if sig else "hold",
+                "confidence_score": float(sig['confidence_score']) if sig and sig['confidence_score'] else None,
+                "reason_code": sig['reason_code'] if sig and sig['reason_code'] else None,
+                "quality_grade": sig['quality_grade'] if sig and sig['quality_grade'] else None,
+                "social_available": bool(sig['social_available']) if sig else False,
+            })
+
+        # Sort by S_total descending
+        results.sort(key=lambda x: x['s_total'], reverse=True)
+        return results
     except Exception as e:
         return {"error": str(e)}
 
@@ -217,37 +260,44 @@ async def get_watchlist():
 
 @app.get("/api/signals")
 async def get_signals():
-    """Returns the latest signal scores for all active symbols."""
+    """Returns the latest signal scores for all active symbols.
+
+    Set-based: one DISTINCT ON query for the latest decision per symbol instead
+    of a per-symbol N+1 loop. Preserves ACTIVE_SYMBOLS ordering and the original
+    behaviour of omitting symbols that have no decision yet.
+    """
     try:
         async with pool.acquire() as conn:
-            results = []
-            for symbol in settings.ACTIVE_SYMBOLS:
-                sig = await conn.fetchrow("""
-                    SELECT ds.s_social, ds.s_market, ds.s_risk, ds.s_total, ds.ts_eval,
-                           ds.action_proposed, ds.confidence_score, ds.reason_code, ds.quality_grade,
-                           COALESCE(sqa.has_sufficient_social, FALSE) AS social_available
-                    FROM decision_snapshot ds
-                    LEFT JOIN signal_quality_audit sqa ON sqa.decision_snapshot_id = ds.id
-                    WHERE ds.symbol = $1
-                    ORDER BY ds.ts_eval DESC
-                    LIMIT 1
-                """, symbol)
+            rows = await conn.fetch("""
+                SELECT DISTINCT ON (ds.symbol)
+                       ds.symbol, ds.s_social, ds.s_market, ds.s_risk, ds.s_total, ds.ts_eval,
+                       ds.action_proposed, ds.confidence_score, ds.reason_code, ds.quality_grade,
+                       COALESCE(sqa.has_sufficient_social, FALSE) AS social_available
+                FROM decision_snapshot ds
+                LEFT JOIN signal_quality_audit sqa ON sqa.decision_snapshot_id = ds.id
+                WHERE ds.symbol = ANY($1::text[])
+                ORDER BY ds.symbol, ds.ts_eval DESC
+            """, settings.ACTIVE_SYMBOLS)
+        by_symbol = {r['symbol']: r for r in rows}
 
-                if sig:
-                    results.append({
-                        "symbol": symbol,
-                        "s_social": float(sig['s_social']),
-                        "s_market": float(sig['s_market']),
-                        "s_risk": float(sig['s_risk']),
-                        "s_total": float(sig['s_total']),
-                        "ts_eval": sig['ts_eval'].isoformat(),
-                        "action_proposed": sig['action_proposed'],
-                        "confidence_score": float(sig['confidence_score']) if sig['confidence_score'] else None,
-                        "reason_code": sig.get('reason_code'),
-                        "quality_grade": sig.get('quality_grade'),
-                        "social_available": bool(sig['social_available']),
-                    })
-            return results
+        results = []
+        for symbol in settings.ACTIVE_SYMBOLS:
+            sig = by_symbol.get(symbol)
+            if sig:
+                results.append({
+                    "symbol": symbol,
+                    "s_social": float(sig['s_social']),
+                    "s_market": float(sig['s_market']),
+                    "s_risk": float(sig['s_risk']),
+                    "s_total": float(sig['s_total']),
+                    "ts_eval": sig['ts_eval'].isoformat(),
+                    "action_proposed": sig['action_proposed'],
+                    "confidence_score": float(sig['confidence_score']) if sig['confidence_score'] else None,
+                    "reason_code": sig['reason_code'],
+                    "quality_grade": sig['quality_grade'],
+                    "social_available": bool(sig['social_available']),
+                })
+        return results
     except Exception as e:
         return {"error": str(e)}
 
@@ -464,7 +514,14 @@ async def get_sources_for_symbol(symbol: str, limit: int = 50):
 
 @app.get("/api/market-features/{symbol:path}")
 async def get_market_features(symbol: str):
-    """Returns the latest market microstructure features for a symbol."""
+    """Returns the latest market microstructure features for a symbol.
+
+    Pinned to settings.DISPLAY_EXCHANGE: market_feature_1s holds one row per
+    exchange (PK ts,symbol,exchange_code) and the feature worker writes all of
+    [binance,kraken,coinbase] each cycle, so an unfiltered `ORDER BY ts DESC
+    LIMIT 1` returns whichever exchange's write landed last — a race that can
+    show another venue's microstructure under a Binance-labelled cockpit.
+    """
     try:
         async with pool.acquire() as conn:
             record = await conn.fetchrow("""
@@ -473,10 +530,10 @@ async def get_market_features(symbol: str):
                        trade_pressure, relative_volume, slippage_bps_est,
                        bid_px, ask_px, mid_px
                 FROM market_feature_1s
-                WHERE symbol = $1
+                WHERE symbol = $1 AND exchange_code = $2
                 ORDER BY ts DESC
                 LIMIT 1
-            """, symbol)
+            """, symbol, settings.DISPLAY_EXCHANGE)
 
             if not record:
                 return {"error": "No market features available"}
@@ -579,9 +636,9 @@ async def get_health():
                 SELECT DISTINCT ON (symbol) symbol, bucket_start,
                        EXTRACT(EPOCH FROM (now() - bucket_start)) * 1000 AS age_ms
                 FROM ohlcv_1s
-                WHERE symbol = ANY($1::text[]) AND exchange_code = 'binance'
+                WHERE symbol = ANY($1::text[]) AND exchange_code = $2
                 ORDER BY symbol, bucket_start DESC
-            """, settings.ACTIVE_SYMBOLS)
+            """, settings.ACTIVE_SYMBOLS, settings.DISPLAY_EXCHANGE)
             seen = {r['symbol']: r for r in rows}
             for sym in settings.ACTIVE_SYMBOLS:
                 r = seen.get(sym)
@@ -943,18 +1000,18 @@ async def get_binance_klines(symbol: str):
 
 @app.get("/api/historical/{symbol:path}")
 async def get_historical(symbol: str, limit: int = 1800):
-    # Pin to Binance: ohlcv_1s holds buckets for binance/kraken/coinbase, and an
-    # unfiltered "latest bucket" could silently return a different exchange/market
-    # (e.g. Coinbase BTC-USD ≠ Binance BTC/USDT). This is a real source of the
-    # cockpit-vs-Binance gap.
+    # Pin to settings.DISPLAY_EXCHANGE: ohlcv_1s holds buckets for
+    # binance/kraken/coinbase, and an unfiltered "latest bucket" could silently
+    # return a different exchange/market (e.g. Coinbase BTC-USD ≠ Binance
+    # BTC/USDT). This is a real source of the cockpit-vs-Binance gap.
     async with pool.acquire() as conn:
         records = await conn.fetch("""
             SELECT bucket_start, open, high, low, close, volume_base
             FROM ohlcv_1s
-            WHERE symbol = $1 AND exchange_code = 'binance'
+            WHERE symbol = $1 AND exchange_code = $2
             ORDER BY bucket_start DESC
-            LIMIT $2
-        """, symbol, limit)
+            LIMIT $3
+        """, symbol, settings.DISPLAY_EXCHANGE, limit)
 
     data = []
     for r in reversed(records):
@@ -1023,10 +1080,10 @@ async def websocket_endpoint(websocket: WebSocket, symbol: str):
                     SELECT bucket_start, open, high, low, close, volume_base,
                            EXTRACT(EPOCH FROM (now() - bucket_start)) * 1000 AS age_ms
                     FROM ohlcv_1s
-                    WHERE symbol = $1 AND exchange_code = 'binance'
+                    WHERE symbol = $1 AND exchange_code = $2
                     ORDER BY bucket_start DESC
                     LIMIT 1
-                """, symbol)
+                """, symbol, settings.DISPLAY_EXCHANGE)
 
                 if record:
                     age_ms = float(record['age_ms']) if record['age_ms'] is not None else None

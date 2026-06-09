@@ -15,7 +15,20 @@ class Settings(BaseSettings):
     
     # Supported Exchanges
     EXCHANGES: list[str] = Field(default=["binance", "kraken", "coinbase"])
-    
+
+    # Single source of truth for which exchange the cockpit's DB-backed "latest"
+    # reads (price/microstructure/freshness) are pinned to. market_feature_1s and
+    # ohlcv_1s hold one row per exchange for the same symbol; an unfiltered
+    # "latest" read races across them and can show e.g. Coinbase BTC-USD under a
+    # Binance BTC/USDT label. Every display query filters on this constant.
+    DISPLAY_EXCHANGE: str = Field(default="binance", description="Exchange the cockpit's DB-backed latest price/feature/freshness reads are pinned to")
+
+    # Feature worker: bound the per-cycle concurrency of compute_features. The
+    # worker is intentionally scoped to the small ACTIVE_SYMBOLS core (not the
+    # 300-symbol display universe), so the default is modest; raise it only if
+    # ACTIVE_SYMBOLS is grown toward universe size.
+    FEATURE_MAX_CONCURRENCY: int = Field(default=8, description="Max concurrent compute_features() calls per feature-worker cycle")
+
     # Initial Symbols for Live Capture (Base/Quote pairs, e.g., BTC/USDT)
     ACTIVE_SYMBOLS: list[str] = Field(
         default=["BTC/USDT", "ETH/USDT", "SOL/USDT"],
