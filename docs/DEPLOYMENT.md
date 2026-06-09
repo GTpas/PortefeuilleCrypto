@@ -95,6 +95,19 @@ Définies dans `.env` (à la racine) ou l'environnement. Source de vérité : `c
 | `DEFILLAMA_API_BASE` | api.llama.fi | Base REST DefiLlama (gratuit, sans clé) |
 | `FEAR_GREED_API_BASE` | api.alternative.me | Base REST Fear & Greed (gratuit, sans clé) |
 
+### Tier DeFi par protocole (top protocoles par TVL — DefiLlama, gratuit, sans clé)
+| Variable | Défaut | Rôle |
+|---|---|---|
+| `ENABLE_DEFI_PROTOCOLS` | True | Active le hub DeFi-protocoles (liste classée, display-only) |
+| `DEFI_PROTOCOLS_LIMIT` | 50 | Cap dur du top-N protocoles (borne mémoire) |
+| `DEFI_PROTOCOLS_MIN_TVL` | 1000000 | Plancher TVL (USD) pour entrer dans le classement |
+| `DEFI_PROTOCOLS_REFRESH_SECONDS` | 120 | Cadence de re-poll de DefiLlama `/protocols` |
+| `DEFI_PROTOCOLS_HTTP_TIMEOUT` | 15.0 | Timeout HTTP `/protocols` (réponse ~7,6k entrées → plus large que le macro) |
+| `DEFI_PROTOCOLS_STALE_MS` | 600000 | Seuil staleness du snapshot |
+| `DEFI_EXCLUDE_CATEGORIES` | ["CEX","Chain"] | Catégories exclues (réserves d'exchange ≠ DeFi) |
+
+> Réutilise `DEFILLAMA_API_BASE` (timeout dédié `DEFI_PROTOCOLS_HTTP_TIMEOUT`).
+
 ### Bornes mémoire (back & front)
 | Variable | Défaut | Rôle |
 |---|---|---|

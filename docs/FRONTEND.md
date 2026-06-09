@@ -19,10 +19,11 @@ Cockpit temps réel servi **directement par l'API** sur `http://localhost:8000/`
 - **Signals & sentiment** : cartes SOC / MKT / RSK / Σ par symbole.
 - **Microstructure** : spread, depth, imbalance, trade pressure, relative volume, slippage.
 - **Activity feed** : décisions horodatées (ring buffer).
-- **Modales** : Logs, Drill-down (waterfall des facteurs), Timeline, **🖥 Ops / Terminals**, **🔬 Live Source Debug**, Docs.
+- **Modales** : Logs, Drill-down (waterfall des facteurs + **Source Evidence** structurée), Timeline, **🖥 Ops / Terminals**, **🏦 DeFi** (top protocoles par TVL — DefiLlama, table rang/nom/catégorie/chaînes/TVL/24h/7j + breakdown par catégorie, **données réelles uniquement** : `n/a`/vide honnête si hub off), **🔬 Live Source Debug**, Docs.
+- **Source Evidence** (Drill-down) : `renderDecisionSourceEvidence()` rend le bloc `source_evidence` de `/api/decision/{id}` — badge global `complete/partial/missing`, warnings, et une carte par groupe **Market / Risk / Social** (statut `available/stale/unavailable`, provider, exchange, table source, âge, métriques `name/value/contribution/explanation` reliées aux facteurs persistés ; social : auteur/source/texte/relevance/horodatage des vraies lignes, sinon `Social evidence unavailable` + raison). **Jamais de mock comme réel** ; fallback rétro-compatible sur l'ancien champ `evidence` si `source_evidence` absent ; aucun crash sur `null`/groupes/métriques vides.
 
 ## Endpoints consommés
-REST : `/api/binance/config`, `/api/watchlist`, `/api/market/universe?limit=300`, `/api/market/global`, `/api/market/symbol/{symbol}/klines?range=…`, `/api/historical/{symbol}`, `POST /api/market/active-symbol`, `/api/portfolio`, `/api/signals`, `/api/market-features/{symbol}`, `/api/binance/debug/{symbol}`.
+REST : `/api/binance/config`, `/api/watchlist`, `/api/market/universe?limit=300`, `/api/market/global`, `/api/market/defi?limit=50`, `/api/market/symbol/{symbol}/klines?range=…`, `/api/historical/{symbol}`, `POST /api/market/active-symbol`, `/api/portfolio`, `/api/signals`, `/api/market-features/{symbol}`, `/api/binance/debug/{symbol}`.
 WebSocket : `ws://<host>/ws/live/{symbol}`.
 Ops (modale) : `window.OPS_URL` (défaut `http://<host>:8050`) → `/api/ops/*`, `/ws/ops`.
 

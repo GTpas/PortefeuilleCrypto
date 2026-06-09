@@ -570,6 +570,29 @@ select:hover, select:focus { border-color: var(--accent-color); }
 .evidence-author { font-weight: 600; color: var(--accent-color); }
 .evidence-text { font-size: 0.78rem; color: var(--text-secondary); line-height: 1.4; }
 
+/* ── Source Evidence (structured: market / risk / social) ── */
+.ev-head { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; }
+.ev-badge { font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+    padding: 0.12rem 0.5rem; border-radius: 999px; }
+.ev-badge.ev-ok { background: rgba(38, 194, 129, 0.14); color: var(--up-color); border: 1px solid rgba(38, 194, 129, 0.3); }
+.ev-badge.ev-warn { background: rgba(255, 176, 46, 0.14); color: var(--warn-color); border: 1px solid rgba(255, 176, 46, 0.34); }
+.ev-badge.ev-bad { background: rgba(139, 148, 165, 0.12); color: var(--text-muted); border: 1px solid var(--border-color); }
+.ev-empty { color: var(--text-muted); font-size: 0.8rem; padding: 0.5rem; }
+.ev-warning { font-size: 0.74rem; color: var(--warn-color); background: rgba(255, 176, 46, 0.08);
+    border: 1px solid rgba(255, 176, 46, 0.2); border-radius: var(--radius-sm); padding: 0.35rem 0.6rem; margin-bottom: 0.4rem; }
+.ev-group { border: 1px solid var(--border-color); border-radius: var(--radius-sm);
+    background: var(--bg-panel); padding: 0.55rem 0.7rem; margin-bottom: 0.5rem; }
+.ev-group-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.2rem; }
+.ev-group-label { font-size: 0.8rem; font-weight: 600; color: var(--text-primary); }
+.ev-group-meta { font-size: 0.66rem; color: var(--text-muted); margin-bottom: 0.4rem; }
+.ev-group-empty { font-size: 0.74rem; color: var(--text-muted); font-style: italic; }
+.ev-metric { border-top: 1px solid var(--border-color); padding: 0.3rem 0; }
+.ev-metric:first-of-type { border-top: none; }
+.ev-metric-head { display: flex; justify-content: space-between; font-size: 0.74rem; color: var(--text-secondary); }
+.ev-metric-head .positive { color: var(--up-color); font-weight: 600; }
+.ev-metric-head .negative { color: var(--down-color); font-weight: 600; }
+.ev-metric-exp { font-size: 0.68rem; color: var(--text-muted); line-height: 1.35; }
+
 /* ============================================
    TIMELINE MODAL
    ============================================ */
@@ -660,3 +683,20 @@ select:hover, select:focus { border-color: var(--accent-color); }
 .live-debug-table tr.ld-hdr td { color: var(--accent-color); text-transform: uppercase; font-size: 0.68rem; letter-spacing: 0.06em; padding-top: 10px; text-align: left; opacity: 0.85; }
 .live-debug-hint { margin-top: 0.8rem; font-size: 0.72rem; color: var(--text-muted); line-height: 1.5; }
 .live-debug-hint code, .ld-formula { background: rgba(255,255,255,0.05); padding: 1px 5px; border-radius: 4px; color: var(--text-primary); }
+
+/* DEFI MODAL (top protocols by TVL — DefiLlama) */
+.defi-categories { display: flex; flex-wrap: wrap; gap: 0.4rem 0.8rem; margin-bottom: 0.8rem; }
+.defi-cat { font-size: 0.72rem; color: var(--text-muted); background: rgba(255,255,255,0.04); padding: 2px 8px; border-radius: 4px; }
+.defi-cat b { color: var(--text-primary); font-weight: 600; }
+.defi-cat i { color: var(--text-muted); font-style: normal; opacity: 0.7; }
+.defi-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+.defi-table thead th { text-align: left; color: var(--text-muted); text-transform: uppercase; font-size: 0.64rem; letter-spacing: 0.06em; padding: 4px 8px; border-bottom: 1px solid var(--border-color); }
+.defi-table td { padding: 4px 8px; border-bottom: 1px solid rgba(255,255,255,0.05); }
+.defi-table td.defi-rank { color: var(--text-muted); white-space: nowrap; }
+.defi-table td.defi-name { color: var(--text-primary); font-weight: 600; }
+.defi-table td.defi-tvl { color: var(--text-primary); font-weight: 600; white-space: nowrap; }
+.defi-table td.up { color: var(--up-color); }
+.defi-table td.down { color: var(--down-color); }
+.defi-table td.flat { color: var(--text-muted); }
+.defi-sym { color: var(--text-muted); font-weight: 400; font-size: 0.72rem; }
+.defi-empty { text-align: center; color: var(--text-muted); font-style: italic; padding: 1.2rem; }

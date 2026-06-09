@@ -24,12 +24,41 @@
             <div class="controls">
                 <span id="universe-badge" class="status-badge disconnected" title="Universe (top trending Binance Spot pairs)">Universe —</span>
                 <button id="ops-btn" class="log-btn">🖥 Ops</button>
+                <button id="defi-btn" class="log-btn" title="Top DeFi protocols by TVL (DefiLlama)">🏦 DeFi</button>
                 <button id="logs-btn" class="log-btn">📋 Logs</button>
                 <button id="live-debug-btn" class="log-btn" title="Compare raw Binance values vs the cockpit's displayed value">🔬 Source</button>
                 <span id="ops-status" class="status-badge disconnected" title="Ops supervisor status">Ops ?</span>
                 <span id="ws-status" class="status-badge disconnected">Offline</span>
             </div>
         </header>
+
+        <!-- DEFI MODAL (top protocols by TVL — DefiLlama, real data only) -->
+        <div id="defi-modal" class="modal hidden">
+            <div class="modal-content logs-content">
+                <div class="modal-header">
+                    <h2>DeFi — Top protocoles par TVL</h2>
+                    <div class="ops-header-right">
+                        <span id="defi-status" class="status-badge disconnected" title="Source DefiLlama /protocols">—</span>
+                        <button id="close-defi" class="close-btn">&times;</button>
+                    </div>
+                </div>
+                <div class="modal-body">
+                    <div id="defi-summary" class="live-debug-summary"></div>
+                    <div id="defi-categories" class="defi-categories"></div>
+                    <table class="defi-table">
+                        <thead>
+                            <tr><th>#</th><th>Protocole</th><th>Catégorie</th><th>Chaînes</th><th>TVL</th><th>24h</th><th>7j</th></tr>
+                        </thead>
+                        <tbody id="defi-rows"></tbody>
+                    </table>
+                    <div class="live-debug-hint">
+                        Source : <code>DefiLlama /protocols</code> (gratuit, sans clé). Catégories
+                        <code>CEX</code>/<code>Chain</code> exclues (réserves d'exchange ≠ DeFi).
+                        TVL DeFi globale dans la barre macro.
+                    </div>
+                </div>
+            </div>
+        </div>
 
         <!-- LOGS MODAL -->
         <div id="logs-modal" class="modal hidden">

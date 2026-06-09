@@ -33,6 +33,30 @@ Les symboles canoniques contiennent un `/` (ex. `BTC/USDT`) → routes en `:path
 
 > Le filtre anti-mock `COALESCE(ts.name,'') NOT ILIKE 'mock%'` s'applique à `/api/decision`, `/api/sources` → un contenu simulé n'atteint jamais l'evidence.
 
+#### `source_evidence` (champ de `/api/decision/{decision_id}`)
+En plus des champs existants (`snapshot`, `factors`, `quality_audit`, `evidence` — **inchangés, rétro-compatibles**), la réponse porte un bloc **`source_evidence`** structuré et traçable, assemblé par `api/decision_evidence.assemble_source_evidence()` (fonction **pure**, testée offline) à partir des données **déjà persistées** (aucune décision recalculée, aucune source fabriquée) :
+```jsonc
+"source_evidence": {
+  "status": "complete|partial|missing",
+  "decision_id": 483, "symbol": "ETH/USDT", "exchange_code": "binance",
+  "generated_at": "…Z",
+  "quality": { "quality_grade", "has_sufficient_market", "has_sufficient_social", "degradation_reasons" },
+  "freshness": { "market_data_age_ms", "social_data_age_ms", "status": "available|stale|unavailable" },
+  "groups": [
+    { "type": "market", "label": "Market Evidence", "status": "available|stale|unavailable",
+      "provider": "internal_market_features", "exchange_code": "binance",
+      "source_table": "market_feature_1s", "age_ms": 340,
+      "metrics": [ { "name": "spread_bps", "value": 2.308, "score_contribution": 0.9066, "explanation": "…" } ],
+      "items": [] },
+    { "type": "risk",   "provider": "internal_risk_engine", "source_table": "decision_factor / portfolio_state", … },
+    { "type": "social", "status": "unavailable", "provider": null, "reason": "social_data_unavailable",
+      "metrics": [], "items": [ /* author/source/text/relevance/published_at quand dispo */ ] }
+  ],
+  "warnings": ["Social evidence unavailable. …"]
+}
+```
+Règles : facteurs groupés par `factor_category` (market/risk/social) ; `score_contribution`/`value`/`explanation` viennent de `decision_factor` (jamais réinventés ; explication manquante → phrase neutre) ; fraîcheur depuis `signal_quality_audit.{market,social}_data_age_ms` (seuils `SOURCE_EVIDENCE_AVAILABLE_MS`/`SOURCE_EVIDENCE_STALE_MS`) ; **social piloté par les vraies lignes** `decision_evidence_link` (mock filtré), jamais par le placeholder `social_unavailable` ; un groupe avec métriques persistées n'est jamais `unavailable` (au pire `stale`). Échec d'assemblage ⇒ `source_evidence: null` (le reste de la réponse reste servi).
+
 ### Marché & microstructure
 | Méthode | Route | Rôle | Lit |
 |---|---|---|---|
@@ -43,7 +67,7 @@ Les symboles canoniques contiennent un `/` (ex. `BTC/USDT`) → routes en `:path
 ### Santé, logs, docs in-app
 | Méthode | Route | Rôle |
 |---|---|---|
-| GET | `/api/health` | DB up/down + fraîcheur OHLCV/symbole + bloc `binance_live` (hub) + bloc `universe` + bloc `global_context` (macro) + `social_source` honnête |
+| GET | `/api/health` | DB up/down + fraîcheur OHLCV/symbole + bloc `binance_live` (hub) + bloc `universe` + bloc `global_context` (macro) + bloc `defi_protocols` + `social_source` honnête |
 | GET | `/api/system/logs?limit=100` | Logs backend (`system_log`) |
 | GET | `/api/docs/signals-sentiments` | Doc markdown in-app du moteur Signals & Sentiments |
 | GET | `/metrics` | Exposition Prometheus (route explicite, pas un mount) |
@@ -61,7 +85,7 @@ Les symboles canoniques contiennent un `/` (ex. `BTC/USDT`) → routes en `:path
 | GET | `/api/market/universe?limit=300` | Top tendances (rows légers, `is_core` marqué). Vide + statut honnête si hub off. |
 | GET | `/api/market/trending?limit=300` | Alias de `/api/market/universe` |
 | GET | `/api/market/universe/debug` | **Pourquoi le compte ≠ 300** : tickers bruts, eligible, exclusions par raison, `final_universe_count`, latences, `last_error` |
-| GET | `/api/market/source` | Quelle donnée est réelle / mock / non configurée (prix, chart, univers, social, **global**) |
+| GET | `/api/market/source` | Quelle donnée est réelle / mock / non configurée (prix, chart, univers, social, **global**, **defi_protocols**) |
 | GET | `/api/market/symbol/{symbol:path}/snapshot` | Plein détail si Tier 3, sinon row léger, sinon `unavailable` |
 | GET | `/api/market/symbol/{symbol:path}/klines?range=1D` | Klines REST réelles pour le range (1D/7D/1M/1Y, alias 1J/7J/1An) |
 | POST | `/api/market/active-symbol` | Body `{symbol, range}` → sélectionne le Tier 3 + range, **un seul reconnect**, renvoie klines fraîches |
@@ -70,6 +94,7 @@ Les symboles canoniques contiennent un `/` (ex. `BTC/USDT`) → routes en `:path
 | Méthode | Route | Rôle |
 |---|---|---|
 | GET | `/api/market/global` | Macro **données réelles uniquement** : 3 blocs `market` (CoinGecko `/global` : total mcap, volume 24h, dominance BTC/ETH, var. mcap 24h), `defi` (DefiLlama `/v2/chains` : TVL DeFi total + top chains), `sentiment` (alternative.me `/fng/` : Fear & Greed). Chaque bloc porte `real`/`stale`/`error`/`age_ms`. Source jamais répondue ⇒ `real=false` + valeurs nulles (jamais fabriquées). `enabled:false` si `ENABLE_GLOBAL_CONTEXT=False`. |
+| GET | `/api/market/defi?limit=50` | **Top protocoles DeFi par TVL** (DefiLlama `/protocols`) **données réelles uniquement** : `protocols` (rang, nom, catégorie, chaînes, `tvl_usd`, `change_1d/7d`, `mcap_usd`), `categories` (TVL par catégorie), `total_tracked_tvl_usd`. Catégories `CEX`/`Chain` **exclues** (réserves d'exchange ≠ DeFi). Porte `real`/`stale`/`error`/`age_ms` ; vide + `connected:false` si hub off/sans donnée ; échec REST transitoire ⇒ dernier bon snapshot conservé. |
 
 ## WebSocket
 

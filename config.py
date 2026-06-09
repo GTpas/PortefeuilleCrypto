@@ -125,6 +125,18 @@ class Settings(BaseSettings):
     COINGECKO_API_KEY: str = Field(default="", description="Optional CoinGecko Demo API key (x-cg-demo-api-key). Empty = free public tier")
     DEFILLAMA_API_BASE: str = Field(default="https://api.llama.fi", description="DefiLlama REST base (free, no key)")
     FEAR_GREED_API_BASE: str = Field(default="https://api.alternative.me", description="Fear & Greed (alternative.me) REST base (free, no key)")
+
+    # ── DeFi protocol tier (ranked list: top protocols by TVL — DefiLlama /protocols) ──
+    # Display-only ranked-list hub (like the Binance universe), on top of the macro
+    # DeFi-TVL aggregate above. Real data only; CEX/Chain rows excluded so the panel
+    # shows genuine DeFi protocols, not exchange reserves. Reuses DEFILLAMA_API_BASE.
+    ENABLE_DEFI_PROTOCOLS: bool = Field(default=True, description="Run the in-process DeFi-protocol hub (top protocols by TVL, display-only)")
+    DEFI_PROTOCOLS_LIMIT: int = Field(default=50, description="Max DeFi protocols kept in the ranked list (hard cap / memory bound)")
+    DEFI_PROTOCOLS_MIN_TVL: float = Field(default=1_000_000.0, description="Minimum TVL (USD) for a protocol to enter the ranking (noise floor)")
+    DEFI_PROTOCOLS_REFRESH_SECONDS: int = Field(default=120, description="How often the DeFi-protocol hub re-polls DefiLlama /protocols (s)")
+    DEFI_PROTOCOLS_HTTP_TIMEOUT: float = Field(default=15.0, description="HTTP timeout (s) for DefiLlama /protocols (heavier ~7.6k-entry response → looser than the macro timeout)")
+    DEFI_PROTOCOLS_STALE_MS: int = Field(default=600_000, description="A DeFi-protocol snapshot is flagged stale if older than this (ms)")
+    DEFI_EXCLUDE_CATEGORIES: list[str] = Field(default=["CEX", "Chain"], description="DefiLlama categories excluded from the DeFi ranking (CEX reserves, chain-level rows)")
     # Social data is MOCK ONLY today. Disabled by default so the cockpit never
     # presents fabricated tweets/authors/scores as real. Set to True ONLY for
     # local development of the social pipeline — content is always tagged mock
@@ -164,6 +176,12 @@ class Settings(BaseSettings):
 
     # Decision safety
     MAX_DATA_AGE_S: int = Field(default=30, description="Max age (seconds) of latest market quote before the risk engine blocks trading (data_stale gate)")
+
+    # Decision drill-down "Source Evidence" freshness thresholds (ms). An evidence
+    # group is `available` if its data age < AVAILABLE_MS, `stale` if < STALE_MS,
+    # else `unavailable`. Display-only; never gates trading.
+    SOURCE_EVIDENCE_AVAILABLE_MS: int = Field(default=5000, description="Source-evidence group counts as fresh/available below this data age (ms)")
+    SOURCE_EVIDENCE_STALE_MS: int = Field(default=60000, description="Source-evidence group counts as stale below this data age (ms); older/null → unavailable")
 
     # Ops supervisor (local dev process manager + Ops/Terminals panel)
     OPS_HOST: str = Field(default="127.0.0.1", description="Bind host for the Ops supervisor HTTP/WS server")

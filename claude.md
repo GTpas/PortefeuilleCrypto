@@ -30,7 +30,7 @@ Le projet doit rester simple à lancer sur une machine locale via Docker, observ
 ### Architecture en une vue
 Deux chemins **séparés volontairement** (deux connexions Binance) :
 - **Persistance** (bot + historique) : `collectors → ingestor → db.writer → trade_tick/bbo_tick → aggregator → ohlcv_1s → agrégats continus`. Features : `feature_worker → market_feature_1s`. Décision : `antigravity_bot → scorer (market+social+risk) → decision_* → paper_trade`.
-- **Affichage** (cockpit, « collé à Binance UI ») : hubs in-process dans l'API — `binance_spot.py` (Tier 3 plein détail) + `universe.py` (Tier 1 ≤300, un seul `!ticker@arr`) + `global_context.py` (tier macro : total mcap / dominance / DeFi TVL / Fear & Greed, sources gratuites) → `/ws/live`, `/api/market/*`, `/api/binance/*`. Lectures DB d'affichage **pinnées** `DISPLAY_EXCHANGE`.
+- **Affichage** (cockpit, « collé à Binance UI ») : hubs in-process dans l'API — `binance_spot.py` (Tier 3 plein détail) + `universe.py` (Tier 1 ≤300, un seul `!ticker@arr`) + `global_context.py` (tier macro : total mcap / dominance / DeFi TVL / Fear & Greed) + `defi.py` (tier DeFi : top protocoles par TVL, DefiLlama) → `/ws/live`, `/api/market/*`, `/api/binance/*`. Sources macro/DeFi gratuites sans clé. Lectures DB d'affichage **pinnées** `DISPLAY_EXCHANGE`.
 - **Ops** : `dev_supervisor → process_supervisor` (Ops API :8050, `/ws/ops`) → panneau 🖥 Ops.
 
 Schéma complet : [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#2-schéma-des-flux-de-données).
@@ -241,7 +241,21 @@ Aucune logique aléatoire ne doit rester dans la chaîne décisionnelle finale.
 - **Front** : **barre macro** (`#macro-bar`, sous la barre portefeuille) — Total Mkt Cap, 24h Volume, Dominance BTC/ETH, var. mcap 24h, DeFi TVL, Fear & Greed + sources live ; `fetchGlobalContext()` poll 30 s ; cellule indisponible = `n/a` (jamais fabriquée), valeur périmée atténuée ; barre masquée si désactivé.
 - **Observabilité** (`/metrics`) : `global_context_refresh_total{source}`, `global_context_refresh_errors_total{source}`, `global_context_refresh_latency_ms{source}`, `global_total_market_cap_usd`, `global_btc_dominance_pct`, `global_defi_tvl_usd`, `global_fear_greed_index`.
 - **Config** (voir `.env`) : `ENABLE_GLOBAL_CONTEXT`, `ENABLE_COINGECKO`, `ENABLE_DEFILLAMA`, `ENABLE_FEAR_GREED`, `GLOBAL_CONTEXT_REFRESH_SECONDS`, `GLOBAL_CONTEXT_HTTP_TIMEOUT`, `GLOBAL_CONTEXT_STALE_MS`, `COINGECKO_API_BASE`, `COINGECKO_API_KEY` (Demo optionnelle), `DEFILLAMA_API_BASE`, `FEAR_GREED_API_BASE`. Tests offline : `tests/test_global_context.py` (parsers + honnêteté real-data-only : snapshot vide, dernière valeur conservée sur erreur, staleness, source désactivée).
-- **Tranches suivantes possibles** (non faites) : DeFi/DEX par protocole (DefiLlama/GeckoTerminal), on-chain (Etherscan/Glassnode, nécessite clés), extension news RSS.
+
+### DeFi par protocole — ranked-list tier (PR7)
+**But** : 2ᵉ tranche du « rapport crypto expert » (deep-research) — passer du **macro DeFi-TVL** (PR6) au **niveau protocole** : top protocoles DeFi par TVL, sans nouvelle dépendance ni clé API.
+
+**Hub ranked-list in-process, display-only** (`market/defi.py` → `DefiHub`, hébergé par l'API dans `lifespan` si `ENABLE_DEFI_PROTOCOLS`, défaut True). **Tier liste classée** (comme l'univers Binance), distinct du macro tier (scalaires) : une tâche de fond re-poll DefiLlama `/protocols` (gratuit, sans clé) toutes les `DEFI_PROTOCOLS_REFRESH_SECONDS` (120) et publie en **swap atomique** la liste top-N par TVL + un breakdown TVL par catégorie + un total suivi.
+
+**⚠️ Bruit vs vrai DeFi** : `/protocols` renvoie ~7,6k entrées **dominées en TVL par des CEX** (réserves Binance/OKX/Bitfinex) et des rows `Chain` — ce ne sont **pas** des protocoles DeFi. Catégories `CEX`/`Chain` **exclues par défaut** (`DEFI_EXCLUDE_CATEGORIES`) → le panneau ranke du vrai DeFi (Lido, Aave V3, EigenLayer, Morpho…). Plancher `DEFI_PROTOCOLS_MIN_TVL` (1M) = garde-bruit.
+
+**Données réelles uniquement** (règle PR2) : helpers **purs et testés** (`is_defi_protocol`/`protocol_row`/`rank_protocols`/`category_breakdown`/`total_tracked_tvl`). Pas de donnée ⇒ liste vide + `connected:false` (jamais un protocole fabriqué) ; échec REST transitoire ⇒ **dernier bon snapshot conservé** (jamais blanchi). Mémoire bornée par `DEFI_PROTOCOLS_LIMIT` (seul le top-N est retenu, pas les 7,6k).
+
+- **Endpoints** : `GET /api/market/defi?limit=50` (`protocols`/`categories`/`total_tracked_tvl_usd` + `real`/`stale`/`error`/`age_ms`). Blocs ajoutés à `GET /api/market/source` (`defi_protocols`) et `GET /api/health` (`defi_protocols`). `GET /api/binance/config` expose `defi_protocols_enabled`.
+- **Front** : **modale 🏦 DeFi** (bouton header) — table rang/nom/catégorie/chaînes/TVL/24h/7j + breakdown catégories ; statut `DefiLlama · live/stale` ou vide honnête.
+- **Observabilité** (`/metrics`) : `defi_protocols_refresh_total`, `defi_protocols_refresh_errors_total`, `defi_protocols_refresh_latency_ms`, `defi_protocols_loaded`, `defi_tracked_tvl_usd`.
+- **Config** (voir `.env`) : `ENABLE_DEFI_PROTOCOLS`, `DEFI_PROTOCOLS_LIMIT`, `DEFI_PROTOCOLS_MIN_TVL`, `DEFI_PROTOCOLS_REFRESH_SECONDS`, `DEFI_PROTOCOLS_STALE_MS`, `DEFI_EXCLUDE_CATEGORIES` (réutilise `DEFILLAMA_API_BASE`/`GLOBAL_CONTEXT_HTTP_TIMEOUT`). Tests : `tests/test_defi.py` (exclusion CEX/Chain, plancher TVL/sort/cap/rank, breakdown catégories, honnêteté hub vide).
+- **Tranches deep-research suivantes** (non faites) : on-chain (Etherscan/Glassnode, **nécessite clés** → secrets), extension news/sentiment RSS, agrégateurs prix (CoinGecko markets).
 
 ### Supervisor & Ops / Terminals (PR2)
 Lancement unique du stack local (ne dépend plus de multiples terminaux Windows) :
@@ -296,7 +310,7 @@ $env:PYTHONPATH="."; python .\scripts\dev_supervisor.py
 | Redis | 6379 |
 
 ### Tests
-`pytest -q` (offline, pas de DB requise) : `test_scorer_thresholds`, `test_social_availability` (garde-fous anti-mock), `test_process_supervisor` (capture stdout/stderr + crash + traceback sur **vrais** subprocess), `test_ops_api` (logique Ops + routes), `test_launch_scripts` (tasks.json + scripts PowerShell valides), `test_engine_decimal`, `test_binance_spot` (hub temps réel + ranges/active-symbol/cache borné), `test_chart_live` (feed graphique : anti-freeze, statut CHART, isolation par symbole), `test_market_universe` (univers 300 : exclusions, score tendance, ranking), `test_deploy_config` (.dockerignore + durcissement compose + settings), `test_rss_collector` (parsing RSS 2.0/Atom réel, strip HTML, dates, anti-mock, politesse), `test_outcome_eval` (return/correctness/horizon — logique pure du backtest), `test_global_context` (macro tier : parsers CoinGecko/DefiLlama/Fear&Greed + honnêteté real-data-only). **181 tests** au total. CI : `.github/workflows/ci.yml` (`pytest -q`) en plus de `docs-check`.
+`pytest -q` (offline, pas de DB requise) : `test_scorer_thresholds`, `test_social_availability` (garde-fous anti-mock), `test_process_supervisor` (capture stdout/stderr + crash + traceback sur **vrais** subprocess), `test_ops_api` (logique Ops + routes), `test_launch_scripts` (tasks.json + scripts PowerShell valides), `test_engine_decimal`, `test_binance_spot` (hub temps réel + ranges/active-symbol/cache borné), `test_chart_live` (feed graphique : anti-freeze, statut CHART, isolation par symbole), `test_market_universe` (univers 300 : exclusions, score tendance, ranking), `test_deploy_config` (.dockerignore + durcissement compose + settings), `test_rss_collector` (parsing RSS 2.0/Atom réel, strip HTML, dates, anti-mock, politesse), `test_outcome_eval` (return/correctness/horizon — logique pure du backtest), `test_global_context` (macro tier : parsers CoinGecko/DefiLlama/Fear&Greed + honnêteté real-data-only), `test_defi` (tier DeFi : exclusion CEX/Chain, plancher TVL/ranking, breakdown catégories, honnêteté hub vide + `total=null` sur set vide + dernier snapshot sur échec), `test_decision_evidence` (assemblage `source_evidence` réel par groupe market/risk/social). **216 tests** au total. CI : `.github/workflows/ci.yml` (`pytest -q`) en plus de `docs-check`.
 
 ## Gestion automatique des terminaux par Claude
 

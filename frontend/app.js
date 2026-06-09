@@ -1025,25 +1025,107 @@ async function openDrilldown(decisionId, symbol) {
             }
         });
 
-        const evidenceContainer = document.getElementById('evidence-container');
-        evidenceContainer.innerHTML = '';
-        if (decision.evidence && decision.evidence.length > 0) {
-            decision.evidence.forEach(e => {
-                const div = document.createElement('div');
-                div.className = 'evidence-item';
-                const time = new Date(e.published_at).toLocaleTimeString();
-                div.innerHTML = `
-                    <div class="evidence-header"><span><span class="evidence-author">${e.author_handle || 'Unknown'}</span> via ${e.source_name || 'unknown'}</span><span>${time}</span></div>
-                    <div class="evidence-text">${escapeHtml(e.text || '')}</div>`;
-                evidenceContainer.appendChild(div);
-            });
-        } else evidenceContainer.innerHTML = '<div style="color:var(--text-muted);font-size:0.8rem;padding:0.5rem;">No real source evidence available for this decision.</div>';
+        renderDecisionSourceEvidence(
+            document.getElementById('evidence-container'),
+            decision.source_evidence,
+            decision.evidence,
+        );
 
         modal.classList.remove('hidden');
     } catch (e) { console.error("Drilldown error:", e); }
 }
 
 function escapeHtml(text) { const div = document.createElement('div'); div.textContent = text; return div.innerHTML; }
+
+// ── Source Evidence (Decision Drill-down) ───────────────────
+// Renders the backend `source_evidence` block: grouped, traceable, honest about
+// stale/unavailable. Falls back to legacy social-only evidence if the new field
+// is absent (backward compatible), and never crashes on null/empty shapes.
+function evStatusClass(s) {
+    if (s === 'available' || s === 'complete') return 'ev-ok';
+    if (s === 'stale' || s === 'partial') return 'ev-warn';
+    return 'ev-bad';
+}
+function fmtAgeMs(ms) {
+    if (ms == null) return 'n/a';
+    return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(0)}s`;
+}
+function renderDecisionSourceEvidence(container, ev, legacyEvidence) {
+    if (!container) return;
+    container.innerHTML = '';
+
+    // Backward-compatible fallback: no structured evidence → legacy social list.
+    if (!ev) {
+        if (legacyEvidence && legacyEvidence.length) {
+            legacyEvidence.forEach(e => {
+                const div = document.createElement('div');
+                div.className = 'evidence-item';
+                const time = e.published_at ? new Date(e.published_at).toLocaleTimeString() : '';
+                div.innerHTML = `<div class="evidence-header"><span><span class="evidence-author">${escapeHtml(e.author_handle || 'Unknown')}</span> via ${escapeHtml(e.source_name || 'unknown')}</span><span>${time}</span></div><div class="evidence-text">${escapeHtml(e.text || '')}</div>`;
+                container.appendChild(div);
+            });
+            return;
+        }
+        container.innerHTML = '<div class="ev-empty">Evidence unavailable for this decision.</div>';
+        return;
+    }
+
+    const head = document.createElement('div');
+    head.className = 'ev-head';
+    head.innerHTML = `<span class="ev-badge ${evStatusClass(ev.status)}">${escapeHtml(ev.status || 'unknown')}</span>`;
+    container.appendChild(head);
+
+    if (ev.status === 'missing') {
+        const m = document.createElement('div');
+        m.className = 'ev-empty';
+        m.textContent = 'Evidence unavailable: no fresh market, risk or social source was found for this decision.';
+        container.appendChild(m);
+    }
+
+    (ev.warnings || []).forEach(w => {
+        const d = document.createElement('div');
+        d.className = 'ev-warning';
+        d.textContent = w;
+        container.appendChild(d);
+    });
+
+    (ev.groups || []).forEach(g => {
+        const card = document.createElement('div');
+        card.className = 'ev-group';
+        const meta = [
+            g.provider ? `provider: ${g.provider}` : null,
+            g.exchange_code ? `exchange: ${g.exchange_code}` : null,
+            g.source_table ? `table: ${g.source_table}` : null,
+            g.age_ms != null ? `age: ${fmtAgeMs(g.age_ms)}` : null,
+        ].filter(Boolean).join(' · ');
+
+        let html = `<div class="ev-group-head"><span class="ev-group-label">${escapeHtml(g.label || g.type || '')}</span><span class="ev-badge ${evStatusClass(g.status)}">${escapeHtml(g.status || '')}</span></div>`;
+        if (meta) html += `<div class="ev-group-meta">${escapeHtml(meta)}</div>`;
+
+        (g.metrics || []).forEach(mt => {
+            const c = mt.score_contribution;
+            const isPos = c >= 0;
+            const contrib = c != null ? `${isPos ? '+' : ''}${Number(c).toFixed(4)}` : '';
+            const val = mt.value != null ? Number(mt.value).toFixed(3) : 'n/a';
+            html += `<div class="ev-metric"><div class="ev-metric-head"><span>${escapeHtml(mt.name || '')}</span><span class="${isPos ? 'positive' : 'negative'}">${contrib}</span></div><div class="ev-metric-exp">Val: ${val} — ${escapeHtml(mt.explanation || '')}</div></div>`;
+        });
+
+        (g.items || []).forEach(it => {
+            const time = it.published_at ? new Date(it.published_at).toLocaleTimeString() : '';
+            const rel = it.relevance_score != null ? ` · rel ${Number(it.relevance_score).toFixed(2)}` : '';
+            html += `<div class="evidence-item"><div class="evidence-header"><span><span class="evidence-author">${escapeHtml(it.author_handle || 'Unknown')}</span> via ${escapeHtml(it.source_name || 'unknown')}${rel}</span><span>${time}</span></div><div class="evidence-text">${escapeHtml(it.text || '')}</div></div>`;
+        });
+
+        if (g.status === 'unavailable' && !(g.metrics || []).length && !(g.items || []).length) {
+            const reason = g.reason ? ` — ${escapeHtml(g.reason)}` : '';
+            const label = g.type === 'social' ? 'Social evidence unavailable' : 'Evidence unavailable';
+            html += `<div class="ev-group-empty">${label}${reason}</div>`;
+        }
+
+        card.innerHTML = html;
+        container.appendChild(card);
+    });
+}
 
 document.getElementById('close-drilldown').addEventListener('click', () => document.getElementById('drilldown-modal').classList.add('hidden'));
 
@@ -1384,9 +1466,89 @@ async function fetchGlobalContext() {
     if (srcEl) srcEl.textContent = live.length ? live.join(' · ') : 'no source';
 }
 
+// ── DeFi modal (top protocols by TVL — DefiLlama, real data only) ─────────────
+function setupDefi() {
+    const modal = document.getElementById('defi-modal');
+    const btn = document.getElementById('defi-btn');
+    const close = document.getElementById('close-defi');
+    if (!modal || !btn) return;
+    btn.addEventListener('click', () => { modal.classList.remove('hidden'); fetchDefi(); });
+    if (close) close.addEventListener('click', () => modal.classList.add('hidden'));
+    modal.addEventListener('click', (e) => { if (e.target === modal) modal.classList.add('hidden'); });
+}
+
+async function fetchDefi() {
+    const statusEl = document.getElementById('defi-status');
+    const rowsEl = document.getElementById('defi-rows');
+    const summaryEl = document.getElementById('defi-summary');
+    const catsEl = document.getElementById('defi-categories');
+    if (!rowsEl) return;
+
+    let snap = null;
+    try {
+        const res = await fetch(`${API_URL}/market/defi?limit=50`);
+        snap = await res.json();
+    } catch (e) {
+        if (statusEl) { statusEl.textContent = 'unavailable'; statusEl.className = 'status-badge disconnected'; }
+        rowsEl.innerHTML = `<tr><td colspan="7" class="defi-empty">DeFi source unavailable (network)</td></tr>`;
+        return;
+    }
+
+    const protocols = (snap && Array.isArray(snap.protocols)) ? snap.protocols : [];
+    const connected = !!(snap && snap.connected);
+    if (statusEl) {
+        if (snap && snap.enabled === false) { statusEl.textContent = 'disabled'; statusEl.className = 'status-badge disconnected'; }
+        else if (connected && protocols.length) {
+            statusEl.textContent = snap.stale ? 'DefiLlama · stale' : 'DefiLlama · live';
+            statusEl.className = `status-badge ${snap.stale ? 'disconnected' : 'connected'}`;
+        } else { statusEl.textContent = 'waiting data'; statusEl.className = 'status-badge disconnected'; }
+    }
+
+    if (summaryEl) {
+        // Real-data-only: require count>0 AND a non-null total — a 0/empty set is never
+        // shown as a "$0 TVL" reading (the backend already publishes null in that case).
+        if (connected && snap.count > 0 && snap.total_tracked_tvl_usd != null) {
+            const ageS = snap.age_ms != null ? Math.round(snap.age_ms / 1000) + 's' : '—';
+            summaryEl.textContent = `${snap.count} protocoles · TVL suivie ${fmtUsdCompact(snap.total_tracked_tvl_usd)} · maj ${ageS}`;
+        } else summaryEl.textContent = snap && snap.enabled === false ? 'Hub DeFi désactivé.' : 'En attente de données DefiLlama…';
+    }
+
+    if (catsEl) {
+        // Category names come from the external DefiLlama API → escape before innerHTML.
+        const cats = (snap && Array.isArray(snap.categories)) ? snap.categories : [];
+        catsEl.innerHTML = cats.map(c =>
+            `<span class="defi-cat"><b>${escapeHtml(c.category)}</b> ${fmtUsdCompact(c.tvl_usd) ?? 'n/a'} <i>(${Number(c.count) || 0})</i></span>`
+        ).join('');
+    }
+
+    if (!protocols.length) {
+        rowsEl.innerHTML = `<tr><td colspan="7" class="defi-empty">${connected ? 'No protocols above the TVL floor' : 'No real DeFi data yet'}</td></tr>`;
+        return;
+    }
+    // All string fields below (name, symbol, category, chains) are external API data —
+    // escape every one before injecting into innerHTML (XSS guard). Numbers go through
+    // our own formatters.
+    rowsEl.innerHTML = protocols.map(p => {
+        const chainList = Array.isArray(p.chains) ? p.chains : [];
+        const first = chainList[0] ? escapeHtml(chainList[0]) : '—';
+        const chains = (p.chains_count > 1) ? `${first} +${p.chains_count - 1}` : first;
+        const sym = p.symbol ? ` <span class="defi-sym">${escapeHtml(p.symbol)}</span>` : '';
+        return `<tr>
+            <td class="defi-rank">${Number(p.rank) || ''}</td>
+            <td class="defi-name">${escapeHtml(p.name)}${sym}</td>
+            <td>${p.category ? escapeHtml(p.category) : '—'}</td>
+            <td title="${escapeHtml(chainList.join(', '))}">${chains}</td>
+            <td class="defi-tvl">${fmtUsdCompact(p.tvl_usd) ?? 'n/a'}</td>
+            <td class="${chgClass(p.change_1d)}">${p.change_1d != null ? fmtPct(p.change_1d) : '—'}</td>
+            <td class="${chgClass(p.change_7d)}">${p.change_7d != null ? fmtPct(p.change_7d) : '—'}</td>
+        </tr>`;
+    }).join('');
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
     setupLogging();
     setupOps();
+    setupDefi();
     startFeedWatchdog();
     startChartWatchdog();
     initChart();

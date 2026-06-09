@@ -1,6 +1,8 @@
 import asyncio
 import json
+import logging
 import time
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
@@ -18,6 +20,10 @@ from market.binance_spot import (
 )
 from market.universe import BinanceUniverseHub
 from market.global_context import GlobalContextHub
+from market.defi import DefiHub
+from api.decision_evidence import assemble_source_evidence
+
+logger = logging.getLogger("api")
 
 # Global DB pool
 pool = None
@@ -25,6 +31,7 @@ execution_engine = None
 binance_hub: BinanceSpotHub | None = None
 universe_hub: BinanceUniverseHub | None = None
 global_hub: GlobalContextHub | None = None
+defi_hub: DefiHub | None = None
 
 
 def _range_intervals() -> dict:
@@ -39,7 +46,7 @@ def _range_intervals() -> dict:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global pool, execution_engine, binance_hub, universe_hub, global_hub
+    global pool, execution_engine, binance_hub, universe_hub, global_hub, defi_hub
     pool = await asyncpg.create_pool(settings.DATABASE_URL)
     execution_engine = PaperExecutionEngine(pool)
 
@@ -103,6 +110,20 @@ async def lifespan(app: FastAPI):
         )
         await global_hub.start()
 
+    # Ranked-list tier: top DeFi protocols by TVL (DefiLlama /protocols). In-process,
+    # display-only, free public source — CEX/Chain rows excluded (genuine DeFi only).
+    if settings.ENABLE_DEFI_PROTOCOLS:
+        defi_hub = DefiHub(
+            defillama_base=settings.DEFILLAMA_API_BASE,
+            limit=settings.DEFI_PROTOCOLS_LIMIT,
+            min_tvl=settings.DEFI_PROTOCOLS_MIN_TVL,
+            exclude_categories=settings.DEFI_EXCLUDE_CATEGORIES,
+            refresh_seconds=settings.DEFI_PROTOCOLS_REFRESH_SECONDS,
+            http_timeout=settings.DEFI_PROTOCOLS_HTTP_TIMEOUT,
+            stale_ms=settings.DEFI_PROTOCOLS_STALE_MS,
+        )
+        await defi_hub.start()
+
     yield
 
     if binance_hub:
@@ -111,6 +132,8 @@ async def lifespan(app: FastAPI):
         await universe_hub.stop()
     if global_hub:
         await global_hub.stop()
+    if defi_hub:
+        await defi_hub.stop()
     await pool.close()
 
 app = FastAPI(lifespan=lifespan, title="Antigravity Cockpit API")
@@ -390,6 +413,7 @@ async def get_decision_detail(decision_id: int):
             # Quality audit
             audit = await conn.fetchrow("""
                 SELECT social_sources_count, has_sufficient_social, has_sufficient_market,
+                       market_data_age_ms, social_data_age_ms,
                        quality_grade, degradation_reasons
                 FROM signal_quality_audit
                 WHERE decision_snapshot_id = $1
@@ -413,11 +437,66 @@ async def get_decision_detail(decision_id: int):
                 LIMIT 20
             """, decision_id)
 
+            factors_list = [
+                {
+                    "category": f['factor_category'],
+                    "name": f['factor_name'],
+                    "value": float(f['factor_value']),
+                    "contribution": float(f['score_contribution']),
+                    "explanation": f['explanation'],
+                }
+                for f in factors
+            ]
+            evidence_list = [
+                {
+                    "raw_content_id": e['raw_content_id'],
+                    "relevance_score": float(e['relevance_score']),
+                    "source_name": e['source_name'],
+                    "author_handle": e['author_handle'],
+                    "source_url": e['source_url'],
+                    "published_at": e['published_at'].isoformat(),
+                    "text": json.loads(e['raw_payload']).get('text', '') if isinstance(e['raw_payload'], str) else e['raw_payload'].get('text', ''),
+                }
+                for e in evidence
+            ]
+            audit_dict = {
+                "social_sources_count": audit['social_sources_count'] if audit else 0,
+                "has_sufficient_social": audit['has_sufficient_social'] if audit else False,
+                "has_sufficient_market": audit['has_sufficient_market'] if audit else False,
+                "market_data_age_ms": audit['market_data_age_ms'] if audit else None,
+                "social_data_age_ms": audit['social_data_age_ms'] if audit else None,
+                "quality_grade": audit['quality_grade'] if audit else "unknown",
+                "degradation_reasons": list(audit['degradation_reasons']) if audit and audit['degradation_reasons'] else [],
+            } if audit else None
+
+            # Structured, traceable evidence built from data already persisted for
+            # this decision (factors grouped by category + freshness from the
+            # quality audit + real-only social evidence). Never recomputes a
+            # decision, never fabricates a source. Defensive: a failure here must
+            # not break the (backward-compatible) decision payload.
+            source_evidence = None
+            try:
+                source_evidence = assemble_source_evidence(
+                    decision_id=snapshot['id'],
+                    symbol=snapshot['symbol'],
+                    exchange_code=snapshot['exchange_code'],
+                    snapshot={"quality_grade": snapshot.get('quality_grade')},
+                    factors=factors_list,
+                    audit=audit_dict,
+                    social_evidence=evidence_list,
+                    available_ms=settings.SOURCE_EVIDENCE_AVAILABLE_MS,
+                    stale_ms=settings.SOURCE_EVIDENCE_STALE_MS,
+                    generated_at=datetime.now(timezone.utc).isoformat(),
+                )
+            except Exception as ev_err:  # pragma: no cover - defensive
+                logger.warning("source_evidence build failed for decision %s: %s", decision_id, ev_err)
+
             return {
                 "snapshot": {
                     "id": snapshot['id'],
                     "ts_eval": snapshot['ts_eval'].isoformat(),
                     "symbol": snapshot['symbol'],
+                    "exchange_code": snapshot['exchange_code'],
                     "s_social": float(snapshot['s_social']),
                     "s_market": float(snapshot['s_market']),
                     "s_risk": float(snapshot['s_risk']),
@@ -427,38 +506,14 @@ async def get_decision_detail(decision_id: int):
                     "reason_code": snapshot.get('reason_code'),
                     "quality_grade": snapshot.get('quality_grade'),
                 },
-                "factors": [
-                    {
-                        "category": f['factor_category'],
-                        "name": f['factor_name'],
-                        "value": float(f['factor_value']),
-                        "contribution": float(f['score_contribution']),
-                        "explanation": f['explanation'],
-                    }
-                    for f in factors
-                ],
+                "factors": factors_list,
                 # Top-level flag the frontend uses to decide whether to render the
                 # social sub-score as a real number or as "n/a (unavailable)".
                 "social_available": bool(audit['has_sufficient_social']) if audit else False,
-                "quality_audit": {
-                    "social_sources_count": audit['social_sources_count'] if audit else 0,
-                    "has_sufficient_social": audit['has_sufficient_social'] if audit else False,
-                    "has_sufficient_market": audit['has_sufficient_market'] if audit else False,
-                    "quality_grade": audit['quality_grade'] if audit else "unknown",
-                    "degradation_reasons": audit['degradation_reasons'] if audit else [],
-                } if audit else None,
-                "evidence": [
-                    {
-                        "raw_content_id": e['raw_content_id'],
-                        "relevance_score": float(e['relevance_score']),
-                        "source_name": e['source_name'],
-                        "author_handle": e['author_handle'],
-                        "source_url": e['source_url'],
-                        "published_at": e['published_at'].isoformat(),
-                        "text": json.loads(e['raw_payload']).get('text', '') if isinstance(e['raw_payload'], str) else e['raw_payload'].get('text', ''),
-                    }
-                    for e in evidence
-                ],
+                "quality_audit": audit_dict,
+                "evidence": evidence_list,
+                # New: structured, grouped, traceable evidence (market/risk/social).
+                "source_evidence": source_evidence,
             }
     except Exception as e:
         return {"error": str(e)}
@@ -681,6 +736,7 @@ async def get_health():
     binance_live = binance_hub.status() if binance_hub else {"enabled": settings.ENABLE_BINANCE_SPOT, "connected": False}
     universe_status = universe_hub.status() if universe_hub else {"enabled": settings.ENABLE_MARKET_UNIVERSE, "connected": False, "count": 0}
     global_status = global_hub.status() if global_hub else {"enabled": settings.ENABLE_GLOBAL_CONTEXT, "connected": False}
+    defi_status = defi_hub.status() if defi_hub else {"enabled": settings.ENABLE_DEFI_PROTOCOLS, "connected": False, "count": 0}
     return {
         "status": "ok" if (db_status == "up" and any_fresh) else "degraded",
         "db_status": db_status,
@@ -689,6 +745,7 @@ async def get_health():
         "binance_live": binance_live,
         "universe": universe_status,
         "global_context": global_status,
+        "defi_protocols": defi_status,
         "symbols": symbols,
     }
 
@@ -859,6 +916,8 @@ async def get_binance_config():
         "universe_limit": settings.UNIVERSE_LIMIT,
         # Global macro context (mcap / dominance / DeFi TVL / sentiment) availability.
         "global_context_enabled": bool(settings.ENABLE_GLOBAL_CONTEXT and global_hub is not None),
+        # DeFi protocol tier (top protocols by TVL) availability.
+        "defi_protocols_enabled": bool(settings.ENABLE_DEFI_PROTOCOLS and defi_hub is not None),
         # Frontend memory bounds (the cockpit enforces these client-side).
         "frontend_limits": {
             "max_candles_per_symbol": settings.MAX_CANDLES_PER_SYMBOL,
@@ -940,7 +999,27 @@ async def get_market_source():
             "real": bool(global_hub and global_hub.status()["connected"]),
             "enabled": bool(settings.ENABLE_GLOBAL_CONTEXT and global_hub is not None),
         },
+        "defi_protocols": {
+            "source": "defillama" if (defi_hub and defi_hub.connected) else "unavailable",
+            "real": bool(defi_hub and defi_hub.connected),
+            "enabled": bool(settings.ENABLE_DEFI_PROTOCOLS and defi_hub is not None),
+            "count": len(defi_hub.protocols()) if defi_hub else 0,
+        },
     }
+
+
+@app.get("/api/market/defi")
+async def get_market_defi(limit: int = 50):
+    """Top DeFi protocols by TVL (DefiLlama /protocols) + TVL-by-category breakdown.
+
+    Real data only — CEX/Chain rows are excluded (genuine DeFi protocols only).
+    Empty list + honest ``connected=false`` if the hub is disabled / has no data;
+    a transient REST failure keeps the last good snapshot (never blanked)."""
+    if not defi_hub:
+        return {"enabled": False, "connected": False, "count": 0, "protocols": [],
+                "categories": [], "reason": "defi_protocols_disabled"}
+    limit = max(1, min(limit, settings.DEFI_PROTOCOLS_LIMIT))
+    return defi_hub.snapshot(limit)
 
 
 @app.get("/api/market/global")

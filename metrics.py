@@ -125,6 +125,24 @@ global_fear_greed_index = Gauge(
     "global_fear_greed_index", "Crypto Fear & Greed index [0,100] (alternative.me)"
 )
 
+# ── DeFi protocol tier (ranked list: top protocols by TVL — DefiLlama /protocols) ──
+defi_protocols_refresh_total = Counter(
+    "defi_protocols_refresh_total", "DefiLlama /protocols refreshes attempted"
+)
+defi_protocols_refresh_errors_total = Counter(
+    "defi_protocols_refresh_errors_total", "DefiLlama /protocols refreshes that failed (kept last snapshot)"
+)
+defi_protocols_refresh_latency_ms = Histogram(
+    "defi_protocols_refresh_latency_ms", "Time to fetch+rank one /protocols snapshot (ms)",
+    buckets=(50, 100, 250, 500, 1000, 2500, 5000, 10000, 20000),
+)
+defi_protocols_loaded = Gauge(
+    "defi_protocols_loaded", "Protocols in the current ranked DeFi snapshot"
+)
+defi_tracked_tvl_usd = Gauge(
+    "defi_tracked_tvl_usd", "Sum of TVL across the tracked DeFi protocols (USD, DefiLlama)"
+)
+
 # ── Aggregator (trade_tick → ohlcv_1s) ──────────
 aggregator_cycles_total = Counter(
     "aggregator_cycles_total", "Aggregation cycles run (loop iterations)"
