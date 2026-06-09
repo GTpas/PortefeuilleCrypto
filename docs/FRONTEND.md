@@ -32,21 +32,35 @@ Cockpit temps réel servi **directement par l'API** sur `http://localhost:8000/`
 
 - **Signal « why »** : chaque carte signal porte une ligne d'explication dérivée de `explainReason(reason_code, s_total)` (le `reason_code` **persisté** est servi par `/api/signals`) — BUY/HOLD/REDUCE/EXIT et le risk gate forçant éventuel. Jamais fabriqué : absente si `reason_code` est nul.
 
-## Responsive & drawer
-- **≥1100px** : 3 colonnes (watchlist · chart · Decision Intelligence). `--left-w`/`--right-w` se compactent à 1440/1280px ; les labels des tool-buttons passent en icône seule ≤1280px.
-- **≤1100px** : le panneau droit devient un **drawer off-canvas** (bouton header `#toggle-right`, `#close-right`, `#drawer-backdrop`, fermeture `Esc`/clic backdrop) — `body.right-open` est piloté par `setupRightDrawer()`, la media query CSS possède le reste. Grille passe à 2 colonnes.
-- **≤880px** : 1 colonne (watchlist en haut, capée à ~34vh + scroll, puis chart). **≤560px** : header/typo compactés.
-- Le chart **ne reçoit jamais** `height/width=0` (garde dans le `ResizeObserver`) → pas de collapse pendant une transition de layout/drawer.
+## Panneau Decision Intelligence (droite) — V2
+- **Selected Market** + **Signals & Sentiment** (cartes SOC/MKT/RSK/Σ + ligne « why »).
+- **Risk Gates** (`updateRiskGates`/`renderRiskGates`) : pour le symbole sélectionné, lit la **dernière décision** (`/api/signals/{sym}?limit=1` → `reason_code`/`s_risk`) et le décompte risque **persisté** (`/api/decision/{id}`, factors `category='risk'`). Affiche `tradeable`/`forced HOLD` + le gate forçant (`risk_gate:*`, libellé via `RISK_GATE_LABELS`) + facteurs réels. Symbole non-core ⇒ « no bot decision » honnête (jamais de matrice fabriquée).
+- **Microstructure** (spread/depth/imbalance/trade pressure/rel. vol/slippage).
+- **Source Quality** (`updateSourceQuality`) : `/api/market/source` → une puce par flux (Price/Chart/Universe/Social/Macro/DeFi) = `live`/`mock`/`stale`/`unavailable`/`disabled` + source + âge connu. **Social** honnête (`mock` vs `not configured`).
+
+## Activity feed à onglets (bas) — V2
+`setupFeedTabs`/`refreshActivity` ⇒ **Trades** (`/api/trades/recent`) · **Decisions** (`/api/signals` + « why ») · **Errors** (`/api/system/logs` filtré WARN/ERROR/CRITICAL) · **Incidents** (`window.OPS_URL`+`/api/ops/incidents`). États vides/erreur **honnêtes** : un non-array de l'Ops API ⇒ « Incidents unavailable » (jamais un faux « ✓ »). Lignes cliquables = `role=button`/`tabindex`/clavier ; ouvrent le drill-down.
+
+## Thème clair/sombre — V2
+Opt-in `html[data-theme="light"]` (persisté `localStorage:ag_theme`, bouton header `🌙/☀️`, `aria-pressed`). `applyChartTheme()` synchronise texte/grille/bordures Lightweight-Charts (les séries up/down restent les couleurs canoniques). Sémantiques clair **vérifiées WCAG AA** (≥4.5:1 sur la surface la plus faible `#E8ECF2` : up `#0A7048`, down `#CC1F38`, warn `#9A5B00`). Les boîtes de logs Ops (fond `#070A0F` permanent) gardent un texte clair stable même en thème clair.
+
+## Responsive & drawers
+- **≥1100px** : 3 colonnes (watchlist · chart · Decision Intelligence). `--left-w`/`--right-w` se compactent à 1440/1280px ; labels des tool-buttons en icône seule ≤1280px.
+- **≤1100px** : panneau **droit** = drawer off-canvas (`#toggle-right`/`#close-right`/`#drawer-backdrop`, `Esc`/backdrop). Grille 2 colonnes.
+- **≤880px** : chart pleine largeur ; panneau **gauche** (Market Explorer) = drawer off-canvas (`#toggle-left`, `☰`). **≤560px** : header/typo compactés.
+- Drawers pilotés par `setupDrawers()` (`body.left-open`/`right-open`), CSS possède les media queries ; backdrop partagé, **focus déplacé dans le panneau ouvert puis restitué au déclencheur**, `aria-expanded` sur les toggles.
+- Le chart **ne reçoit jamais** `height/width=0` (garde `ResizeObserver`) → pas de collapse pendant une transition de layout/drawer.
 
 ## Accessibilité
-- `:focus-visible` visible partout (boutons, inputs, selects, lignes watchlist).
-- Boutons-icônes : `aria-label` ; lignes watchlist `role="button"` + `tabindex=0` + activation clavier `Enter`/`Espace`.
+- `:focus-visible` partout (boutons, inputs, selects, lignes watchlist & feed).
+- Boutons-icônes : `aria-label` ; lignes watchlist **et** feed `role="button"` + `tabindex=0` + clavier `Enter`/`Espace`.
+- Onglets (watchlist & feed) : `aria-pressed` (état sélectionné non couleur-seule). Toggles drawer : `aria-expanded`. Thème : `aria-pressed`.
 - États **live/stale/offline/unavailable** distingués par **texte** (badge), pas par la couleur seule.
 - `prefers-reduced-motion` : coupe pulse header, shimmer skeleton et animations de modales.
 - Contraste relevé (`--text-secondary`/`--text-muted`), prix coloré sans clignotement agressif.
 
 ## Endpoints consommés
-REST : `/api/binance/config`, `/api/watchlist`, `/api/market/universe?limit=300`, `/api/market/global`, `/api/market/defi?limit=50`, `/api/market/symbol/{symbol}/klines?range=…`, `/api/historical/{symbol}`, `POST /api/market/active-symbol`, `/api/portfolio`, `/api/signals`, `/api/market-features/{symbol}`, `/api/binance/debug/{symbol}`, `/api/reports/daily/latest`, `POST /api/reports/daily/generate`.
+REST : `/api/binance/config`, `/api/watchlist`, `/api/market/universe?limit=300`, `/api/market/global`, `/api/market/defi?limit=50`, `/api/market/source`, `/api/market/symbol/{symbol}/klines?range=…`, `/api/historical/{symbol}`, `POST /api/market/active-symbol`, `/api/portfolio`, `/api/signals`, `/api/signals/{symbol}`, `/api/decision/{id}`, `/api/market-features/{symbol}`, `/api/trades/recent`, `/api/system/logs`, `/api/binance/debug/{symbol}`, `/api/reports/daily/latest`, `POST /api/reports/daily/generate`.
 WebSocket : `ws://<host>/ws/live/{symbol}`.
 Ops (modale) : `window.OPS_URL` (défaut `http://<host>:8050`) → `/api/ops/*`, `/ws/ops`.
 

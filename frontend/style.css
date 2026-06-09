@@ -62,8 +62,10 @@
 }
 
 /* Light theme — opt-in via <html data-theme="light"> (persisted in localStorage).
-   Semantic up/down are darkened for AA contrast on light surfaces; the chart's
-   own series/grid colours are synced separately by applyChartTheme() in app.js. */
+   Semantic up/down/warn are darkened so SMALL text clears WCAG AA (≥4.5:1) on the
+   LOWEST-contrast light surface (--bg-app #E8ECF2), not just pure white — verified:
+   up #0A7048 ≥5.17, down #CC1F38 ≥4.64, warn #9A5B00 ≥4.58. The chart's own
+   series/grid colours are synced separately by applyChartTheme() in app.js. */
 html[data-theme="light"] {
     --bg-app:          #E8ECF2;
     --bg-main:         #F6F8FB;
@@ -76,17 +78,17 @@ html[data-theme="light"] {
     --text-primary:    #0E1726;
     --text-secondary:  #46546B;
     --text-muted:      #697587;
-    --up-color:        #0E9F6E;
-    --down-color:      #E02D43;
-    --warn-color:      #C2790F;
+    --up-color:        #0A7048;
+    --down-color:      #CC1F38;
+    --warn-color:      #9A5B00;
     --blue-color:      #2563EB;
     --info-color:      #2563EB;
     --purple-color:    #8B3FB8;
     --accent-color:    #0891A8;
     --accent-glow:     rgba(8, 145, 168, 0.13);
-    --up-soft:    rgba(14, 159, 110, 0.13);
-    --down-soft:  rgba(224, 45, 67, 0.12);
-    --warn-soft:  rgba(194, 121, 15, 0.15);
+    --up-soft:    rgba(10, 112, 72, 0.14);
+    --down-soft:  rgba(204, 31, 56, 0.12);
+    --warn-soft:  rgba(154, 91, 0, 0.16);
     --blue-soft:  rgba(37, 99, 235, 0.12);
     --purple-soft:rgba(139, 63, 184, 0.13);
     --accent-soft:rgba(8, 145, 168, 0.12);
@@ -94,6 +96,21 @@ html[data-theme="light"] {
     --shadow:      0 18px 50px rgba(20, 30, 50, 0.22);
     --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.6), 0 6px 22px rgba(20, 30, 50, 0.10);
 }
+
+/* Light theme: the Ops modal log/console boxes keep a permanently-dark surface
+   (#070A0F, hardcoded), so their text must NOT follow the flipped text tokens —
+   pin bright, theme-stable colours so messages stay legible on the dark boxes. */
+html[data-theme="light"] .ops-logs .ops-log-m,
+html[data-theme="light"] .ops-unavailable pre { color: #E6EAF2; }
+html[data-theme="light"] .ops-log-t,
+html[data-theme="light"] .ops-log-lvl { color: #8C97A8; }
+html[data-theme="light"] .ops-log-p { color: #5B9DF9; }
+html[data-theme="light"] .ops-log-line.warning .ops-log-lvl,
+html[data-theme="light"] .ops-log-line.warning .ops-log-m { color: #FFB02E; }
+html[data-theme="light"] .ops-log-line.error .ops-log-lvl,
+html[data-theme="light"] .ops-log-line.error .ops-log-m,
+html[data-theme="light"] .ops-log-line.critical .ops-log-lvl,
+html[data-theme="light"] .ops-log-line.critical .ops-log-m { color: #F0616D; }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 

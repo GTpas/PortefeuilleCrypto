@@ -6,6 +6,17 @@ Format : `## [date] — titre court` puis **Quoi / Pourquoi / Impact**.
 
 ---
 
+## [2026-06-10] — Cockpit frontend V2 : feed à onglets, Risk Gates, Source Quality, drawers, thème clair
+- **Quoi** : suite de la refonte v3 (front **vanilla**, anti-mock, IDs/WS/anti-freeze inchangés).
+  1. **Activity feed à onglets** (`setupFeedTabs`/`refreshActivity`) : **Trades** (`/api/trades/recent`), **Decisions** (`/api/signals` + ligne « why » via `explainReason`), **Errors** (`/api/system/logs` filtré WARN/ERROR/CRITICAL), **Incidents** (`:8050/api/ops/incidents`). États vides/erreur **honnêtes** (jamais un faux « ✓ » : un non-array de l'Ops API ⇒ « Incidents unavailable »).
+  2. **Panneau Risk Gates** (droite, `updateRiskGates`) : pour le symbole sélectionné, lit la dernière décision (`/api/signals/{sym}?limit=1` → `reason_code` `risk_gate:*` + `s_risk`) et le décompte risque **réel** (`/api/decision/{id}` factors `category='risk'`). Symbole non-core ⇒ « no bot decision » honnête (jamais de matrice fabriquée).
+  3. **Source Quality** (droite, `updateSourceQuality`) : `/api/market/source` → puces live/mock/stale/unavailable par flux (price/chart/universe/social/macro/defi) + âges client connus.
+  4. **Drawers** : gauche « Market Explorer » <880px (bouton `☰`), droite « Decision Intelligence » ≤1100px ; backdrop partagé, `Esc`, **gestion du focus** (déplacé dans le panneau, restitué au déclencheur) + `aria-expanded`.
+  5. **Thème clair** opt-in (`html[data-theme=light]`, persisté `localStorage`, bouton `🌙/☀️`) + `applyChartTheme()` synchronise texte/grille/bordures Lightweight-Charts. Sémantiques clair **vérifiées WCAG AA** (≥4.5:1 sur la surface la plus faible `#E8ECF2` : up `#0A7048`, down `#CC1F38`, warn `#9A5B00`) ; les boîtes de logs Ops (fond `#070A0F` permanent) gardent un texte clair stable.
+  6. **A11y** : lignes de feed cliquables `role=button`/`tabindex`/clavier ; onglets `aria-pressed` (état non couleur-seule) ; whitelist de la classe `action` (anti-injection défensive).
+- **Pourquoi** : compléter le cockpit pour répondre aux 10 questions UX (état portefeuille → actions récentes), tout en respectant la règle real-data-only.
+- **Impact** : **3 fichiers front** (`index.html`/`style.css`/`app.js`). Revue **multi-agent adversariale** (5 dimensions, vérif. par-finding) : **8 findings confirmés appliqués** (1 faux positif écarté : taille des onglets — calcul erroné). Aucun endpoint/WS/worker/migration touché ; `pytest` **237** inchangé (front pur). Docs : `FRONTEND.md`.
+
 ## [2026-06-10] — Daily Crypto Intelligence Report (advisory tier, PR8)
 - **Quoi** : nouveau module **`reports/`** (display/report-only) + worker `workers/report_worker.py` générant un **rapport conseil crypto quotidien** (minuit, TZ configurable) sur les ~300 cryptos de l'univers : classement global, prédiction indicative prudente, signal **BUY/HOLD/SELL/AVOID**, ratios explicables, rating **A+→E**, explication pédagogique FR, source evidence réelle, historique.
   - `reports/scoring.py` — formules **pures** centralisées (source unique de vérité) : ratios (momentum, volume-confirmation via percentile+VWAP, liquidité, force vs BTC, qualité tendance, volatilité, drawdown, market-context), Opportunity/Risk/Confidence `0–100`, rating, signal (AVOID→BUY→SELL→HOLD), `up_probability` **bornée [0.15,0.85]**.

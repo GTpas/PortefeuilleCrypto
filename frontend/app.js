@@ -453,13 +453,19 @@ function setupWatchlistControls() {
     }
     const tabs = document.getElementById('wl-tabs');
     if (tabs) {
+        const sync = (active) => tabs.querySelectorAll('button').forEach(x => {
+            const on = x === active;
+            x.classList.toggle('active', on);
+            x.setAttribute('aria-pressed', String(on));   // selected state for AT, not colour-only
+        });
         tabs.querySelectorAll('button').forEach(b => {
             b.addEventListener('click', () => {
                 activeFilter = b.dataset.filter;
-                tabs.querySelectorAll('button').forEach(x => x.classList.toggle('active', x === b));
+                sync(b);
                 renderWatchlistNow();
             });
         });
+        sync(tabs.querySelector('button.active') || tabs.querySelector('button'));
     }
 }
 
@@ -959,14 +965,32 @@ function feedEmpty(msg) {
     const c = document.getElementById('activity-container');
     if (c) c.innerHTML = `<div class="feed-empty">${escapeHtml(msg)}</div>`;
 }
+// Decision action is a closed backend enum; whitelist before using it as a CSS class
+// (defensive — never interpolate an external string raw into an attribute).
+const ACTION_CLASSES = ['reinforce', 'buy', 'hold', 'reduce', 'exit'];
+function safeActionClass(a) { return ACTION_CLASSES.includes(a) ? a : 'hold'; }
+// Make a clickable feed row keyboard-operable (mirrors the watchlist rows).
+function activateRow(div, fn, label) {
+    div.setAttribute('role', 'button');
+    div.tabIndex = 0;
+    if (label) div.setAttribute('aria-label', label);
+    div.addEventListener('click', fn);
+    div.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn(); } });
+}
 function setupFeedTabs() {
     const tabs = document.getElementById('feed-tabs');
     if (!tabs) return;
+    const sync = (active) => tabs.querySelectorAll('button').forEach(x => {
+        const on = x === active;
+        x.classList.toggle('active', on);
+        x.setAttribute('aria-pressed', String(on));   // selected state for AT, not colour-only
+    });
     tabs.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
         activeFeedTab = b.dataset.feed || 'trades';
-        tabs.querySelectorAll('button').forEach(x => x.classList.toggle('active', x === b));
+        sync(b);
         refreshActivity();
     }));
+    sync(tabs.querySelector('button.active') || tabs.querySelector('button'));
 }
 function refreshActivity() {
     switch (activeFeedTab) {
@@ -989,7 +1013,7 @@ async function loadTradesFeed() {
         data.slice(0, LIMITS.maxEvents).forEach(trade => {
             const div = document.createElement('div');
             div.className = 'feed-item';
-            if (trade.decision_snapshot_id) div.addEventListener('click', () => openDrilldown(trade.decision_snapshot_id, trade.symbol));
+            if (trade.decision_snapshot_id) activateRow(div, () => openDrilldown(trade.decision_snapshot_id, trade.symbol), `${trade.symbol} ${trade.side} trade — open decision`);
             const time = new Date(trade.executed_at).toLocaleTimeString();
             const actionClass = trade.side === 'buy' ? 'buy' : 'sell';
             div.innerHTML = `
@@ -999,7 +1023,7 @@ async function loadTradesFeed() {
                 <span class="feed-score">slip: ${Number(trade.slippage_bps).toFixed(1)}bps | ${escapeHtml(trade.reason || '')}</span>`;
             container.appendChild(div);
         });
-        if (!data.length) feedEmpty('No trades yet — bot is evaluating market conditions…');
+        if (!data.length) feedEmpty('No paper trades recorded yet.');
     } catch (e) { feedEmpty('Trades unavailable.'); }
 }
 
@@ -1014,14 +1038,15 @@ async function loadDecisionsFeed() {
         const container = document.getElementById('activity-container');
         container.innerHTML = '';
         data.forEach(d => {
-            const action = d.action_proposed || 'hold';
+            const rawAction = d.action_proposed || 'hold';
+            const action = safeActionClass(rawAction);
             const div = document.createElement('div');
             div.className = 'feed-item';
-            div.addEventListener('click', () => openSignalDetail(d.symbol));
+            activateRow(div, () => openSignalDetail(d.symbol), `${d.symbol} decision — open detail`);
             const time = d.ts_eval ? new Date(d.ts_eval).toLocaleTimeString() : '';
             div.innerHTML = `
                 <span class="feed-time">${time}</span>
-                <span class="feed-action ${action}">${escapeHtml(action)}</span>
+                <span class="feed-action ${action}">${escapeHtml(rawAction)}</span>
                 <span class="feed-detail">${escapeHtml(d.symbol)} — <span style="color:var(--text-muted)">${escapeHtml(explainReason(d.reason_code, d.s_total))}</span></span>
                 <span class="feed-score">Σ ${d.s_total >= 0 ? '+' : ''}${Number(d.s_total).toFixed(2)} · ${escapeHtml(d.quality_grade || 'n/a')}</span>`;
             container.appendChild(div);
@@ -1066,7 +1091,11 @@ async function loadIncidentsFeed() {
         return;
     }
     if (activeFeedTab !== 'incidents') return;
-    if (!Array.isArray(data) || !data.length) { feedEmpty('No incidents recorded. ✓'); return; }
+    // Distinguish an errored/non-array source from a genuinely empty list — never
+    // assert a clean "no incidents ✓" when the Ops API actually returned an error
+    // envelope (fetch does not throw on HTTP 4xx/5xx).
+    if (!Array.isArray(data)) { feedEmpty('Incidents unavailable (Ops API error).'); return; }
+    if (!data.length) { feedEmpty('No incidents recorded. ✓'); return; }
     const container = document.getElementById('activity-container');
     container.innerHTML = '';
     data.slice().reverse().forEach(inc => {
@@ -1511,16 +1540,37 @@ function setupFrontendErrorReporter() {
 // "Market Explorer" is too. CSS owns the media queries; JS just toggles the
 // body classes and shares one backdrop.
 function setupDrawers() {
-    const closeAll = () => document.body.classList.remove('right-open', 'left-open');
     const tR = document.getElementById('toggle-right');
     const cR = document.getElementById('close-right');
     const tL = document.getElementById('toggle-left');
     const backdrop = document.getElementById('drawer-backdrop');
-    if (tR) tR.addEventListener('click', () => { document.body.classList.remove('left-open'); document.body.classList.toggle('right-open'); });
-    if (cR) cR.addEventListener('click', () => document.body.classList.remove('right-open'));
-    if (tL) tL.addEventListener('click', () => { document.body.classList.remove('right-open'); document.body.classList.toggle('left-open'); });
+    const rightPanel = document.getElementById('intel-panel');
+    const leftPanel = document.querySelector('.watchlist-panel');
+    let lastTrigger = null;
+    const syncAria = () => {
+        if (tR) tR.setAttribute('aria-expanded', String(document.body.classList.contains('right-open')));
+        if (tL) tL.setAttribute('aria-expanded', String(document.body.classList.contains('left-open')));
+    };
+    const focusInto = (panel) => {
+        if (!panel) return;
+        const f = panel.querySelector('button, [href], input, select, [tabindex]');
+        if (f) { try { f.focus(); } catch (e) {} }
+    };
+    const restore = () => { if (lastTrigger) { try { lastTrigger.focus(); } catch (e) {} lastTrigger = null; } };
+    const closeAll = () => { document.body.classList.remove('right-open', 'left-open'); syncAria(); restore(); };
+    const open = (side, panel, trigger) => {
+        const other = side === 'right' ? 'left-open' : 'right-open';
+        document.body.classList.remove(other);
+        const isOpen = document.body.classList.toggle(side + '-open');
+        syncAria();
+        if (isOpen) { lastTrigger = trigger; focusInto(panel); } else { restore(); }
+    };
+    if (tR) tR.addEventListener('click', () => open('right', rightPanel, tR));
+    if (tL) tL.addEventListener('click', () => open('left', leftPanel, tL));
+    if (cR) cR.addEventListener('click', closeAll);
     if (backdrop) backdrop.addEventListener('click', closeAll);
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeAll(); });
+    syncAria();
 }
 
 // ── Theme (dark default · light opt-in, persisted) ──────────────────────────
