@@ -3,15 +3,23 @@
 Cockpit temps réel servi **directement par l'API** sur `http://localhost:8000/` (mount `StaticFiles`). **Pas de process frontend séparé** — ne jamais lancer un `http.server` sur 8000 (conflit avec l'API).
 
 - `frontend/index.html` — structure + libs CDN.
-- `frontend/app.js` — toute la logique (vanilla JS, ~1260 lignes).
-- `frontend/style.css` — thème terminal sombre, grille cockpit.
+- `frontend/app.js` — toute la logique (vanilla JS, ~1600 lignes).
+- `frontend/style.css` — **design system v3** (dark premium), grille cockpit robuste.
+
+> **Vanilla only** : pas de React/Vite/TypeScript/build. Toute refonte reste HTML/CSS/JS pur, **sans casser les IDs/`data-*`** consommés par `app.js`, les WebSockets, ni l'anti-freeze chart.
 
 ## Libs externes (CDN)
 `lightweight-charts` 4.1.1 (bougies + volume), `chart.js` (waterfall du drill-down), `marked.js` (markdown des docs in-app), Inter (Google Fonts).
 
-## Panneaux
-- **Header** : logo + contrôles, badges de statut.
-- **Barre portefeuille** : Total Value, Cash, P&L, Exposure, Positions, Drawdown, statut bot.
+## Design system (`style.css` v3)
+- **Tokens couleurs** : surfaces (`--bg-app/main/panel/card/elev`), borders, texte (`--text-primary/secondary/muted`), sémantiques (`--up/--down/--warn/--blue/--info/--purple/--accent` + variantes `*-soft`). `--up/--down` **identiques** aux couleurs de série du chart (cohérence prix↔bougies).
+- **Variables de layout** : `--header-h`, `--portfolio-h`, `--macro-h`, `--activity-h`, `--left-w`, `--right-w`, `--panel-gap`, `--radius-card`, `--shadow-card`.
+- **Utilitaires** : `.metric-card` / `.metric-label` / `.metric-value`, `.data-chip`, `.state` (badges), `.skeleton` (shimmer de chargement), `.truncate`, `.scroll-panel`.
+- **Layout robuste** : `.app-container` = grid `auto / minmax(0,1fr) / var(--activity-h)` en `100dvh`, `overflow:hidden`. Wrapper **`.top-stack`** = header + KPI portfolio + macro (jamais coupés). `.cockpit-grid` = 3 colonnes `minmax()`. Chaque panneau scrollable : parent `overflow:hidden` + `min-height:0`, scroll uniquement sur `.scroll-panel`.
+
+## Zones (5)
+1. **Top App Bar** (`.app-bar`) : logo + cluster statut (Universe / Ops / Live-Stale-Offline, **texte** pas couleur seule) + cluster tools (🔬 Source, 🏦 DeFi, 📋 Logs, 🖥 Ops) + `#toggle-right` (drawer).
+- **Barre portefeuille** (cartes KPI) : Total Value, Cash, P&L, Exposure, Positions, Drawdown, statut bot.
 - **Barre macro** (`#macro-bar`) : contexte marché global **données réelles uniquement** — Total Mkt Cap, 24h Volume, Dominance BTC/ETH, var. mcap 24h (CoinGecko), DeFi TVL (DefiLlama), Fear & Greed (alternative.me) + sources live. Cellule indisponible = `n/a` (jamais fabriquée), valeur périmée = atténuée. Masquée si `global_context_enabled=false`.
 - **Watchlist** : filtres `trending / volume / gainers / losers / core / favorites` + recherche (debounced).
 - **Chart** : candlestick + volume, sélecteur de range 1J/7J/1M/1An, badges `source` et `chart-status`.
@@ -21,6 +29,21 @@ Cockpit temps réel servi **directement par l'API** sur `http://localhost:8000/`
 - **Activity feed** : décisions horodatées (ring buffer).
 - **Modales** : Logs, Drill-down (waterfall des facteurs + **Source Evidence** structurée), Timeline, **🖥 Ops / Terminals**, **🏦 DeFi** (top protocoles par TVL — DefiLlama, table rang/nom/catégorie/chaînes/TVL/24h/7j + breakdown par catégorie, **données réelles uniquement** : `n/a`/vide honnête si hub off), **🔬 Live Source Debug**, Docs.
 - **Source Evidence** (Drill-down) : `renderDecisionSourceEvidence()` rend le bloc `source_evidence` de `/api/decision/{id}` — badge global `complete/partial/missing`, warnings, et une carte par groupe **Market / Risk / Social** (statut `available/stale/unavailable`, provider, exchange, table source, âge, métriques `name/value/contribution/explanation` reliées aux facteurs persistés ; social : auteur/source/texte/relevance/horodatage des vraies lignes, sinon `Social evidence unavailable` + raison). **Jamais de mock comme réel** ; fallback rétro-compatible sur l'ancien champ `evidence` si `source_evidence` absent ; aucun crash sur `null`/groupes/métriques vides.
+
+- **Signal « why »** : chaque carte signal porte une ligne d'explication dérivée de `explainReason(reason_code, s_total)` (le `reason_code` **persisté** est servi par `/api/signals`) — BUY/HOLD/REDUCE/EXIT et le risk gate forçant éventuel. Jamais fabriqué : absente si `reason_code` est nul.
+
+## Responsive & drawer
+- **≥1100px** : 3 colonnes (watchlist · chart · Decision Intelligence). `--left-w`/`--right-w` se compactent à 1440/1280px ; les labels des tool-buttons passent en icône seule ≤1280px.
+- **≤1100px** : le panneau droit devient un **drawer off-canvas** (bouton header `#toggle-right`, `#close-right`, `#drawer-backdrop`, fermeture `Esc`/clic backdrop) — `body.right-open` est piloté par `setupRightDrawer()`, la media query CSS possède le reste. Grille passe à 2 colonnes.
+- **≤880px** : 1 colonne (watchlist en haut, capée à ~34vh + scroll, puis chart). **≤560px** : header/typo compactés.
+- Le chart **ne reçoit jamais** `height/width=0` (garde dans le `ResizeObserver`) → pas de collapse pendant une transition de layout/drawer.
+
+## Accessibilité
+- `:focus-visible` visible partout (boutons, inputs, selects, lignes watchlist).
+- Boutons-icônes : `aria-label` ; lignes watchlist `role="button"` + `tabindex=0` + activation clavier `Enter`/`Espace`.
+- États **live/stale/offline/unavailable** distingués par **texte** (badge), pas par la couleur seule.
+- `prefers-reduced-motion` : coupe pulse header, shimmer skeleton et animations de modales.
+- Contraste relevé (`--text-secondary`/`--text-muted`), prix coloré sans clignotement agressif.
 
 ## Endpoints consommés
 REST : `/api/binance/config`, `/api/watchlist`, `/api/market/universe?limit=300`, `/api/market/global`, `/api/market/defi?limit=50`, `/api/market/symbol/{symbol}/klines?range=…`, `/api/historical/{symbol}`, `POST /api/market/active-symbol`, `/api/portfolio`, `/api/signals`, `/api/market-features/{symbol}`, `/api/binance/debug/{symbol}`.

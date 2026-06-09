@@ -280,7 +280,11 @@ function initChart() {
     new ResizeObserver(entries => {
         if (!entries.length || entries[0].target !== el) return;
         const r = entries[0].contentRect;
-        chart.applyOptions({ height: r.height, width: r.width });
+        // Never apply a zero/negative size. Lightweight-Charts collapses (and cannot
+        // recover) if it receives height/width 0 during a drawer slide or layout
+        // transition — skip until the container actually has a box.
+        const w = Math.floor(r.width), h = Math.floor(r.height);
+        if (w > 0 && h > 0) chart.applyOptions({ height: h, width: w });
     }).observe(el);
 }
 
@@ -408,6 +412,9 @@ function renderWatchlistNow() {
         const div = document.createElement('div');
         div.className = 'watchlist-item' + (r.symbol === currentSymbol ? ' active' : '');
         div.dataset.symbol = r.symbol;
+        div.setAttribute('role', 'button');
+        div.tabIndex = 0;
+        div.setAttribute('aria-label', `${r.symbol}${r.price != null ? ' ' + fmtPrice(r.price) : ''}`);
         const fav = favorites.has(r.symbol);
         const isUp = r.change_pct == null ? 'flat' : chgClass(r.change_pct);
         const rankBadge = r.rank ? `<span class="wl-rank">#${r.rank}</span>` : '';
@@ -427,6 +434,9 @@ function renderWatchlistNow() {
                 <div class="wl-chg ${isUp}">${r.change_pct == null ? '—' : fmtPct(r.change_pct)}</div>
             </div>`;
         div.addEventListener('click', () => switchSymbol(r.symbol));
+        div.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); switchSymbol(r.symbol); }
+        });
         const favBtn = div.querySelector('.wl-fav');
         favBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleFavorite(r.symbol); });
         frag.appendChild(div);
@@ -769,6 +779,11 @@ async function updateSignals() {
             const socBadge = sig.social_available
                 ? `<span class="score-badge social" data-tooltip="Social signal: sentiment, velocity, credibility">SOC ${sig.s_social >= 0 ? '+' : ''}${sig.s_social.toFixed(2)}</span>`
                 : `<span class="score-badge social unavailable" data-tooltip="No real social feed configured">SOC n/a</span>`;
+            // "Why this action" — derived from the persisted reason_code (real decision
+            // data). Explains BUY/HOLD/REDUCE/EXIT and surfaces any forcing risk gate.
+            const why = sig.reason_code
+                ? `<div class="signal-why" title="Decision reason (persisted reason_code)">${escapeHtml(explainReason(sig.reason_code, sig.s_total))}</div>`
+                : '';
             card.innerHTML = `
                 <div class="signal-symbol">${sig.symbol}<span class="signal-action-badge ${actionClass}">${actionClass}</span></div>
                 <div class="signal-scores">
@@ -777,6 +792,7 @@ async function updateSignals() {
                     <span class="score-badge risk" data-tooltip="Risk gate: liquidity, spread, concentration, drawdown">RSK ${sig.s_risk.toFixed(2)}</span>
                     <span class="score-badge total" data-tooltip="Composite: 0.45×SOC + 0.45×MKT + 0.10×(2×RSK-1)">Σ ${sig.s_total >= 0 ? '+' : ''}${sig.s_total.toFixed(2)}</span>
                 </div>
+                ${why}
                 <div class="signal-meta"><span>Confidence: ${confidencePct}</span><span>Quality: ${sig.quality_grade || 'N/A'}</span></div>`;
             card.addEventListener('click', () => openSignalDetail(sig.symbol));
             container.appendChild(card);
@@ -1379,6 +1395,20 @@ function setupFrontendErrorReporter() {
     window.addEventListener('unhandledrejection', (e) => { const r = e.reason || {}; reportFrontendError('unhandledrejection: ' + (r.message || String(r)), r.stack); });
 }
 
+// ── Right decision-intelligence panel drawer (narrow screens) ───────────────
+// On wide screens the panel lives in the grid; below 1100px it becomes an
+// off-canvas drawer toggled from the header (CSS owns the media query).
+function setupRightDrawer() {
+    const toggle = document.getElementById('toggle-right');
+    const closeBtn = document.getElementById('close-right');
+    const backdrop = document.getElementById('drawer-backdrop');
+    const close = () => document.body.classList.remove('right-open');
+    if (toggle) toggle.addEventListener('click', () => document.body.classList.toggle('right-open'));
+    if (closeBtn) closeBtn.addEventListener('click', close);
+    if (backdrop) backdrop.addEventListener('click', close);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+}
+
 // ── Live source debug modal wiring ─────────
 (function setupLiveDebug() {
     const btn = document.getElementById('live-debug-btn');
@@ -1555,6 +1585,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     setupWatchlistControls();
     setupRangeControls();
     setupFavCurrent();
+    setupRightDrawer();
 
     await loadLiveConfig();          // ranges, limits, sources (needed first)
     // Core overlay and the 300-row universe are independent — fetch them IN PARALLEL
