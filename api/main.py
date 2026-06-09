@@ -17,12 +17,14 @@ from market.binance_spot import (
     BinanceSpotHub, normalize_range, range_to_interval, CHART_RANGES,
 )
 from market.universe import BinanceUniverseHub
+from market.global_context import GlobalContextHub
 
 # Global DB pool
 pool = None
 execution_engine = None
 binance_hub: BinanceSpotHub | None = None
 universe_hub: BinanceUniverseHub | None = None
+global_hub: GlobalContextHub | None = None
 
 
 def _range_intervals() -> dict:
@@ -37,7 +39,7 @@ def _range_intervals() -> dict:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global pool, execution_engine, binance_hub, universe_hub
+    global pool, execution_engine, binance_hub, universe_hub, global_hub
     pool = await asyncpg.create_pool(settings.DATABASE_URL)
     execution_engine = PaperExecutionEngine(pool)
 
@@ -84,12 +86,31 @@ async def lifespan(app: FastAPI):
         )
         await universe_hub.start()
 
+    # Macro tier: global market context (total mcap, dominance, DeFi TVL, sentiment).
+    # In-process, display-only, free public sources — never feeds the bot/persistence.
+    if settings.ENABLE_GLOBAL_CONTEXT:
+        global_hub = GlobalContextHub(
+            enable_coingecko=settings.ENABLE_COINGECKO,
+            enable_defillama=settings.ENABLE_DEFILLAMA,
+            enable_fear_greed=settings.ENABLE_FEAR_GREED,
+            coingecko_base=settings.COINGECKO_API_BASE,
+            coingecko_api_key=settings.COINGECKO_API_KEY,
+            defillama_base=settings.DEFILLAMA_API_BASE,
+            fear_greed_base=settings.FEAR_GREED_API_BASE,
+            refresh_seconds=settings.GLOBAL_CONTEXT_REFRESH_SECONDS,
+            http_timeout=settings.GLOBAL_CONTEXT_HTTP_TIMEOUT,
+            stale_ms=settings.GLOBAL_CONTEXT_STALE_MS,
+        )
+        await global_hub.start()
+
     yield
 
     if binance_hub:
         await binance_hub.stop()
     if universe_hub:
         await universe_hub.stop()
+    if global_hub:
+        await global_hub.stop()
     await pool.close()
 
 app = FastAPI(lifespan=lifespan, title="Antigravity Cockpit API")
@@ -659,6 +680,7 @@ async def get_health():
     # DB/aggregator freshness above (persistence path).
     binance_live = binance_hub.status() if binance_hub else {"enabled": settings.ENABLE_BINANCE_SPOT, "connected": False}
     universe_status = universe_hub.status() if universe_hub else {"enabled": settings.ENABLE_MARKET_UNIVERSE, "connected": False, "count": 0}
+    global_status = global_hub.status() if global_hub else {"enabled": settings.ENABLE_GLOBAL_CONTEXT, "connected": False}
     return {
         "status": "ok" if (db_status == "up" and any_fresh) else "degraded",
         "db_status": db_status,
@@ -666,6 +688,7 @@ async def get_health():
         "social_source": social_source,
         "binance_live": binance_live,
         "universe": universe_status,
+        "global_context": global_status,
         "symbols": symbols,
     }
 
@@ -834,6 +857,8 @@ async def get_binance_config():
         # Universe (Tier 1) availability.
         "universe_enabled": bool(settings.ENABLE_MARKET_UNIVERSE and universe_hub is not None),
         "universe_limit": settings.UNIVERSE_LIMIT,
+        # Global macro context (mcap / dominance / DeFi TVL / sentiment) availability.
+        "global_context_enabled": bool(settings.ENABLE_GLOBAL_CONTEXT and global_hub is not None),
         # Frontend memory bounds (the cockpit enforces these client-side).
         "frontend_limits": {
             "max_candles_per_symbol": settings.MAX_CANDLES_PER_SYMBOL,
@@ -910,7 +935,26 @@ async def get_market_source():
             "source": "mock" if settings.ENABLE_MOCK_SOCIAL else "not_configured",
             "real": False,
         },
+        "global": {
+            "source": "coingecko+defillama+alternative.me" if global_hub else "unavailable",
+            "real": bool(global_hub and global_hub.status()["connected"]),
+            "enabled": bool(settings.ENABLE_GLOBAL_CONTEXT and global_hub is not None),
+        },
     }
+
+
+@app.get("/api/market/global")
+async def get_market_global():
+    """Macro market context: total market cap / dominance / 24h volume (CoinGecko),
+    total DeFi TVL (DefiLlama), and the Fear & Greed sentiment index (alternative.me).
+
+    Real data only — each source carries its own ``real``/``stale``/``error`` flags;
+    a source that has never answered reports ``real=false`` with null values (the
+    cockpit shows n/a), never a fabricated macro number."""
+    if not global_hub:
+        return {"enabled": False, "reason": "global_context_disabled",
+                "market": {"real": False}, "defi": {"real": False}, "sentiment": {"real": False}}
+    return global_hub.snapshot()
 
 
 @app.get("/api/market/symbol/{symbol:path}/snapshot")

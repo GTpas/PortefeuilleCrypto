@@ -106,8 +106,25 @@ class Settings(BaseSettings):
 
     # Feature Flags
     ENABLE_L2_BOOK: bool = Field(default=False, description="Whether to ingest level 2 full order book (Warning: high volume)")
-    ENABLE_COINGECKO: bool = Field(default=False, description="Whether to run CoinGecko enrichment worker")
     ENABLE_DEX: bool = Field(default=False, description="Whether to enable DEX (Uniswap) ingestion")
+
+    # ── Global market context (macro tier: total mcap / dominance / DeFi TVL / sentiment) ──
+    # An in-process, display-only hub (like the Binance hubs) that polls a few FREE,
+    # no-API-key, ToS-safe public endpoints to give the cockpit the macro backdrop the
+    # Binance-only tiers lack. Real data only — a source that never answers shows n/a,
+    # never a fabricated number. Tiny, bounded memory; never feeds the bot/persistence.
+    ENABLE_GLOBAL_CONTEXT: bool = Field(default=True, description="Run the in-process global market-context hub (macro: total mcap, dominance, DeFi TVL, Fear & Greed)")
+    # Per-source sub-toggles (master flag above must also be on).
+    ENABLE_COINGECKO: bool = Field(default=True, description="Global-context source: CoinGecko /global (total market cap, 24h volume, BTC/ETH dominance)")
+    ENABLE_DEFILLAMA: bool = Field(default=True, description="Global-context source: DefiLlama /v2/chains (total DeFi TVL)")
+    ENABLE_FEAR_GREED: bool = Field(default=True, description="Global-context source: alternative.me Fear & Greed sentiment index")
+    GLOBAL_CONTEXT_REFRESH_SECONDS: int = Field(default=60, description="How often the global-context hub re-polls its macro sources (s)")
+    GLOBAL_CONTEXT_HTTP_TIMEOUT: float = Field(default=10.0, description="Per-call HTTP timeout for global-context sources (s)")
+    GLOBAL_CONTEXT_STALE_MS: int = Field(default=300_000, description="A global-context source value is flagged stale if older than this (ms)")
+    COINGECKO_API_BASE: str = Field(default="https://api.coingecko.com/api/v3", description="CoinGecko REST base (public free tier by default)")
+    COINGECKO_API_KEY: str = Field(default="", description="Optional CoinGecko Demo API key (x-cg-demo-api-key). Empty = free public tier")
+    DEFILLAMA_API_BASE: str = Field(default="https://api.llama.fi", description="DefiLlama REST base (free, no key)")
+    FEAR_GREED_API_BASE: str = Field(default="https://api.alternative.me", description="Fear & Greed (alternative.me) REST base (free, no key)")
     # Social data is MOCK ONLY today. Disabled by default so the cockpit never
     # presents fabricated tweets/authors/scores as real. Set to True ONLY for
     # local development of the social pipeline — content is always tagged mock

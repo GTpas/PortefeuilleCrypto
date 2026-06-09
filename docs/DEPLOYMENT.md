@@ -81,6 +81,20 @@ Définies dans `.env` (à la racine) ou l'environnement. Source de vérité : `c
 | `CHART_RANGE_DEFAULT` | 1D | Range au chargement |
 | `CHART_INTERVAL_1D/7D/1M/1Y` | 1m/15m/1h/1d | Mapping range→intervalle |
 
+### Contexte marché global (macro tier — gratuit, sans clé)
+| Variable | Défaut | Rôle |
+|---|---|---|
+| `ENABLE_GLOBAL_CONTEXT` | True | Active le hub macro in-process (display-only) |
+| `ENABLE_COINGECKO` | True | Sous-source : CoinGecko `/global` (total mcap, volume 24h, dominance BTC/ETH) |
+| `ENABLE_DEFILLAMA` | True | Sous-source : DefiLlama `/v2/chains` (TVL DeFi total) |
+| `ENABLE_FEAR_GREED` | True | Sous-source : alternative.me Fear & Greed |
+| `GLOBAL_CONTEXT_REFRESH_SECONDS` | 60 | Cadence de re-poll des sources macro |
+| `GLOBAL_CONTEXT_HTTP_TIMEOUT` | 10.0 | Timeout HTTP par appel |
+| `GLOBAL_CONTEXT_STALE_MS` | 300000 | Seuil staleness d'une valeur macro |
+| `COINGECKO_API_BASE` / `COINGECKO_API_KEY` | api.coingecko.com/api/v3 / *(vide)* | Base REST + clé Demo optionnelle (`x-cg-demo-api-key`) |
+| `DEFILLAMA_API_BASE` | api.llama.fi | Base REST DefiLlama (gratuit, sans clé) |
+| `FEAR_GREED_API_BASE` | api.alternative.me | Base REST Fear & Greed (gratuit, sans clé) |
+
 ### Bornes mémoire (back & front)
 | Variable | Défaut | Rôle |
 |---|---|---|
@@ -101,7 +115,7 @@ Définies dans `.env` (à la racine) ou l'environnement. Source de vérité : `c
 | Variable | Défaut | Rôle |
 |---|---|---|
 | `ENABLE_L2_BOOK` | False | Ingestion carnet L2 complet (volumineux) |
-| `ENABLE_COINGECKO` | False | Worker enrichissement CoinGecko |
+| `ENABLE_COINGECKO` | True | Sous-source macro CoinGecko (voir « Contexte marché global ») |
 | `ENABLE_DEX` | False | Ingestion DEX (Uniswap) |
 | `ENABLE_MOCK_SOCIAL` | **False** | Collecteur social **simulé** (DEV ONLY — jamais présenté comme réel) |
 | `ENABLE_RSS_SOCIAL` | False | Collecteur **RSS news réel** (flux publics, ToS-safe) — vraie source |

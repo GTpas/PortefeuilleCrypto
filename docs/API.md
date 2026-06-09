@@ -43,7 +43,7 @@ Les symboles canoniques contiennent un `/` (ex. `BTC/USDT`) → routes en `:path
 ### Santé, logs, docs in-app
 | Méthode | Route | Rôle |
 |---|---|---|
-| GET | `/api/health` | DB up/down + fraîcheur OHLCV/symbole + bloc `binance_live` (hub) + bloc `universe` + `social_source` honnête |
+| GET | `/api/health` | DB up/down + fraîcheur OHLCV/symbole + bloc `binance_live` (hub) + bloc `universe` + bloc `global_context` (macro) + `social_source` honnête |
 | GET | `/api/system/logs?limit=100` | Logs backend (`system_log`) |
 | GET | `/api/docs/signals-sentiments` | Doc markdown in-app du moteur Signals & Sentiments |
 | GET | `/metrics` | Exposition Prometheus (route explicite, pas un mount) |
@@ -61,10 +61,15 @@ Les symboles canoniques contiennent un `/` (ex. `BTC/USDT`) → routes en `:path
 | GET | `/api/market/universe?limit=300` | Top tendances (rows légers, `is_core` marqué). Vide + statut honnête si hub off. |
 | GET | `/api/market/trending?limit=300` | Alias de `/api/market/universe` |
 | GET | `/api/market/universe/debug` | **Pourquoi le compte ≠ 300** : tickers bruts, eligible, exclusions par raison, `final_universe_count`, latences, `last_error` |
-| GET | `/api/market/source` | Quelle donnée est réelle / mock / non configurée (prix, chart, univers, social) |
+| GET | `/api/market/source` | Quelle donnée est réelle / mock / non configurée (prix, chart, univers, social, **global**) |
 | GET | `/api/market/symbol/{symbol:path}/snapshot` | Plein détail si Tier 3, sinon row léger, sinon `unavailable` |
 | GET | `/api/market/symbol/{symbol:path}/klines?range=1D` | Klines REST réelles pour le range (1D/7D/1M/1Y, alias 1J/7J/1An) |
 | POST | `/api/market/active-symbol` | Body `{symbol, range}` → sélectionne le Tier 3 + range, **un seul reconnect**, renvoie klines fraîches |
+
+### Contexte marché global (macro tier, hub in-process)
+| Méthode | Route | Rôle |
+|---|---|---|
+| GET | `/api/market/global` | Macro **données réelles uniquement** : 3 blocs `market` (CoinGecko `/global` : total mcap, volume 24h, dominance BTC/ETH, var. mcap 24h), `defi` (DefiLlama `/v2/chains` : TVL DeFi total + top chains), `sentiment` (alternative.me `/fng/` : Fear & Greed). Chaque bloc porte `real`/`stale`/`error`/`age_ms`. Source jamais répondue ⇒ `real=false` + valeurs nulles (jamais fabriquées). `enabled:false` si `ENABLE_GLOBAL_CONTEXT=False`. |
 
 ## WebSocket
 

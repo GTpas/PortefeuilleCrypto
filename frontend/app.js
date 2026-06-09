@@ -1308,6 +1308,82 @@ function setupFrontendErrorReporter() {
 })();
 
 // ── Init ───────────────────────────────────
+// ── Macro bar (global market context) ────────────────────────────────────────
+// Real data only: each macro source carries real/stale flags. A source that has
+// never answered renders "n/a" (never a fabricated number); a stale value renders
+// dimmed. The whole bar hides when the global-context hub is disabled.
+function fmtUsdCompact(n) {
+    if (n == null || !Number.isFinite(Number(n))) return null;
+    n = Number(n);
+    const a = Math.abs(n);
+    if (a >= 1e12) return '$' + (n / 1e12).toFixed(2) + 'T';
+    if (a >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
+    if (a >= 1e6) return '$' + (n / 1e6).toFixed(2) + 'M';
+    return '$' + n.toFixed(0);
+}
+
+function setMacroCell(id, text, opts = {}) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = (text == null || text === '') ? 'n/a' : text;
+    el.classList.toggle('na', text == null || text === '');
+    el.classList.toggle('stale', !!opts.stale);
+    el.classList.remove('up', 'down');
+    if (opts.cls) el.classList.add(opts.cls);
+}
+
+async function fetchGlobalContext() {
+    const bar = document.getElementById('macro-bar');
+    if (!bar) return;
+    if (liveConfig.global_context_enabled === false) { bar.style.display = 'none'; return; }
+
+    let snap = null;
+    try {
+        const res = await fetch(`${API_URL}/market/global`);
+        snap = await res.json();
+    } catch (e) { /* keep last paint; cells stay as-is */ return; }
+    if (!snap || snap.enabled === false) { bar.style.display = 'none'; return; }
+    bar.style.display = '';
+
+    const mkt = snap.market || {}, defi = snap.defi || {}, sent = snap.sentiment || {};
+    const live = [];
+
+    // CoinGecko macro
+    if (mkt.real) {
+        setMacroCell('macro-mcap', fmtUsdCompact(mkt.total_market_cap_usd), { stale: mkt.stale });
+        setMacroCell('macro-vol', fmtUsdCompact(mkt.total_volume_usd), { stale: mkt.stale });
+        setMacroCell('macro-btc-dom', mkt.btc_dominance != null ? mkt.btc_dominance.toFixed(1) + '%' : null, { stale: mkt.stale });
+        setMacroCell('macro-eth-dom', mkt.eth_dominance != null ? mkt.eth_dominance.toFixed(1) + '%' : null, { stale: mkt.stale });
+        const chg = mkt.market_cap_change_24h_pct;
+        setMacroCell('macro-mcap-chg', chg != null ? fmtPct(chg) : null,
+            { stale: mkt.stale, cls: chgClass(chg) });
+        live.push('CoinGecko');
+    } else {
+        ['macro-mcap', 'macro-vol', 'macro-btc-dom', 'macro-eth-dom', 'macro-mcap-chg'].forEach(id => setMacroCell(id, null));
+    }
+
+    // DefiLlama TVL
+    if (defi.real) {
+        setMacroCell('macro-defi-tvl', fmtUsdCompact(defi.defi_tvl_usd), { stale: defi.stale });
+        live.push('DefiLlama');
+    } else {
+        setMacroCell('macro-defi-tvl', null);
+    }
+
+    // Fear & Greed sentiment
+    if (sent.real && sent.value != null) {
+        const v = Math.round(sent.value);
+        const cls = v < 45 ? 'down' : v > 55 ? 'up' : '';
+        setMacroCell('macro-fng', `${v} · ${sent.classification || ''}`.trim(), { stale: sent.stale, cls });
+        live.push('Fear&Greed');
+    } else {
+        setMacroCell('macro-fng', null);
+    }
+
+    const srcEl = document.getElementById('macro-source');
+    if (srcEl) srcEl.textContent = live.length ? live.join(' · ') : 'no source';
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
     setupLogging();
     setupOps();
@@ -1332,6 +1408,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     updatePortfolio();
     updateSignals();
     updateActivity();
+    fetchGlobalContext();
 
     // Periodic refreshes (throttled / bounded to keep memory + CPU low).
     setInterval(updatePortfolio, 5000);
@@ -1340,4 +1417,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     setInterval(updateSignals, 10000);
     setInterval(updateActivity, 8000);
     setInterval(() => updateMicrostructure(), 5000);
+    // Macro context updates slowly (server polls ~every 60s); 30s client poll is ample.
+    setInterval(fetchGlobalContext, 30000);
 });

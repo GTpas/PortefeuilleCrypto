@@ -205,6 +205,29 @@ select:hover, select:focus { border-color: var(--accent-color); }
 .portfolio-item .value.up { color: var(--up-color); }
 .portfolio-item .value.down { color: var(--down-color); }
 
+/* MACRO BAR (global market context — mcap / dominance / DeFi TVL / sentiment) */
+.macro-bar {
+    display: flex;
+    gap: 1.6rem;
+    padding: 0.45rem 1.5rem;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border-color);
+    overflow-x: auto;
+    align-items: center;
+}
+.macro-item { display: flex; flex-direction: column; min-width: 88px; }
+.macro-item .label {
+    font-size: 0.58rem; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.7px; margin-bottom: 1px;
+}
+.macro-item .value { font-size: 0.92rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.macro-item .value.up { color: var(--up-color); }
+.macro-item .value.down { color: var(--down-color); }
+.macro-item .value.na { color: var(--text-muted); font-weight: 400; font-style: italic; }
+.macro-item .value.stale { opacity: 0.55; }
+.macro-item.macro-source { margin-left: auto; }
+.macro-item.macro-source .value { font-size: 0.7rem; font-weight: 500; color: var(--text-muted); }
+
 /* ============================================
    WATCHLIST / UNIVERSE PANEL (left)
    ============================================ */

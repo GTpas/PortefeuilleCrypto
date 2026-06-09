@@ -101,6 +101,30 @@ universe_cache_age_ms = Gauge(
     "universe_cache_age_ms", "Age (ms) of the current universe snapshot"
 )
 
+# ── Global market context (macro tier: mcap / dominance / DeFi TVL / sentiment) ──
+global_context_refresh_total = Counter(
+    "global_context_refresh_total", "Global-context source refreshes attempted", ["source"]
+)
+global_context_refresh_errors_total = Counter(
+    "global_context_refresh_errors_total", "Global-context refreshes that failed (kept last value)", ["source"]
+)
+global_context_refresh_latency_ms = Histogram(
+    "global_context_refresh_latency_ms", "Time to fetch+parse one global-context source (ms)",
+    ["source"], buckets=(25, 50, 100, 250, 500, 1000, 2500, 5000, 10000),
+)
+global_total_market_cap_usd = Gauge(
+    "global_total_market_cap_usd", "Total crypto market capitalization (USD, CoinGecko)"
+)
+global_btc_dominance_pct = Gauge(
+    "global_btc_dominance_pct", "Bitcoin dominance (% of total market cap, CoinGecko)"
+)
+global_defi_tvl_usd = Gauge(
+    "global_defi_tvl_usd", "Total DeFi TVL across chains (USD, DefiLlama)"
+)
+global_fear_greed_index = Gauge(
+    "global_fear_greed_index", "Crypto Fear & Greed index [0,100] (alternative.me)"
+)
+
 # ── Aggregator (trade_tick → ohlcv_1s) ──────────
 aggregator_cycles_total = Counter(
     "aggregator_cycles_total", "Aggregation cycles run (loop iterations)"

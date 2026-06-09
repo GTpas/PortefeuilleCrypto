@@ -12,6 +12,7 @@ Cockpit temps réel servi **directement par l'API** sur `http://localhost:8000/`
 ## Panneaux
 - **Header** : logo + contrôles, badges de statut.
 - **Barre portefeuille** : Total Value, Cash, P&L, Exposure, Positions, Drawdown, statut bot.
+- **Barre macro** (`#macro-bar`) : contexte marché global **données réelles uniquement** — Total Mkt Cap, 24h Volume, Dominance BTC/ETH, var. mcap 24h (CoinGecko), DeFi TVL (DefiLlama), Fear & Greed (alternative.me) + sources live. Cellule indisponible = `n/a` (jamais fabriquée), valeur périmée = atténuée. Masquée si `global_context_enabled=false`.
 - **Watchlist** : filtres `trending / volume / gainers / losers / core / favorites` + recherche (debounced).
 - **Chart** : candlestick + volume, sélecteur de range 1J/7J/1M/1An, badges `source` et `chart-status`.
 - **Carte stats** : prix, 24h %, volume, rank, score tendance.
@@ -21,7 +22,7 @@ Cockpit temps réel servi **directement par l'API** sur `http://localhost:8000/`
 - **Modales** : Logs, Drill-down (waterfall des facteurs), Timeline, **🖥 Ops / Terminals**, **🔬 Live Source Debug**, Docs.
 
 ## Endpoints consommés
-REST : `/api/binance/config`, `/api/watchlist`, `/api/market/universe?limit=300`, `/api/market/symbol/{symbol}/klines?range=…`, `/api/historical/{symbol}`, `POST /api/market/active-symbol`, `/api/portfolio`, `/api/signals`, `/api/market-features/{symbol}`, `/api/binance/debug/{symbol}`.
+REST : `/api/binance/config`, `/api/watchlist`, `/api/market/universe?limit=300`, `/api/market/global`, `/api/market/symbol/{symbol}/klines?range=…`, `/api/historical/{symbol}`, `POST /api/market/active-symbol`, `/api/portfolio`, `/api/signals`, `/api/market-features/{symbol}`, `/api/binance/debug/{symbol}`.
 WebSocket : `ws://<host>/ws/live/{symbol}`.
 Ops (modale) : `window.OPS_URL` (défaut `http://<host>:8050`) → `/api/ops/*`, `/ws/ops`.
 

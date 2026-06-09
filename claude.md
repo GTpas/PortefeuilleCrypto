@@ -30,7 +30,7 @@ Le projet doit rester simple à lancer sur une machine locale via Docker, observ
 ### Architecture en une vue
 Deux chemins **séparés volontairement** (deux connexions Binance) :
 - **Persistance** (bot + historique) : `collectors → ingestor → db.writer → trade_tick/bbo_tick → aggregator → ohlcv_1s → agrégats continus`. Features : `feature_worker → market_feature_1s`. Décision : `antigravity_bot → scorer (market+social+risk) → decision_* → paper_trade`.
-- **Affichage** (cockpit, « collé à Binance UI ») : hubs in-process dans l'API — `binance_spot.py` (Tier 3 plein détail) + `universe.py` (Tier 1 ≤300, un seul `!ticker@arr`) → `/ws/live`, `/api/market/*`, `/api/binance/*`. Lectures DB d'affichage **pinnées** `DISPLAY_EXCHANGE`.
+- **Affichage** (cockpit, « collé à Binance UI ») : hubs in-process dans l'API — `binance_spot.py` (Tier 3 plein détail) + `universe.py` (Tier 1 ≤300, un seul `!ticker@arr`) + `global_context.py` (tier macro : total mcap / dominance / DeFi TVL / Fear & Greed, sources gratuites) → `/ws/live`, `/api/market/*`, `/api/binance/*`. Lectures DB d'affichage **pinnées** `DISPLAY_EXCHANGE`.
 - **Ops** : `dev_supervisor → process_supervisor` (Ops API :8050, `/ws/ops`) → panneau 🖥 Ops.
 
 Schéma complet : [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#2-schéma-des-flux-de-données).
@@ -227,6 +227,22 @@ Aucune logique aléatoire ne doit rester dans la chaîne décisionnelle finale.
 - **Tests** (`tests/test_market_universe.py`, +12) : `rejection_reason` partition, `stablecoin_filter_keeps_valid_altcoins` (garde JUP), `universe_loads_300_when_eligible`, `does_not_cap_to_66`, `returns_all_eligible_when_fewer_than_limit`, `debug_counts_rejected_reasons`, `cache_returns_previous_snapshot_on_refresh_failure`. **132 tests** au total.
 - **Diagnostic « pas 300 »** : `GET /api/market/universe/debug` → si `excluded_low_volume_count` est élevé, baisser `MIN_QUOTE_VOLUME` ; si `eligible_symbols_count` ≥ 300 mais `final_universe_count` < 300, vérifier `UNIVERSE_LIMIT`/`BACKEND_MAX_SYMBOLS` ; si `raw_binance_tickers_count` faible/0, REST Binance KO (`last_error`).
 
+### Contexte marché global — macro tier (PR6)
+**But** : 1ʳᵉ tranche du « rapport crypto expert » (deep-research) — donner au cockpit le **backdrop macro** que les tiers Binance-only n'ont pas, en restant local/simple et **sans clé API**.
+
+**Hub macro in-process, display-only** (`market/global_context.py` → `GlobalContextHub`, hébergé par l'API dans `lifespan` si `ENABLE_GLOBAL_CONTEXT`, défaut True). **Quatrième tier d'affichage**, distinct de la persistance/bot : il ne nourrit jamais le scorer ni la DB. Une tâche de fond re-poll toutes les `GLOBAL_CONTEXT_REFRESH_SECONDS` (60) trois sources **gratuites, sans clé, ToS-safe**, chacune derrière son sous-toggle :
+- **CoinGecko** `/api/v3/global` (`ENABLE_COINGECKO`) → total market cap, volume 24h, dominance BTC/ETH, var. mcap 24h.
+- **DefiLlama** `/v2/chains` (`ENABLE_DEFILLAMA`) → TVL DeFi total (somme des TVL par chaîne) + top chains.
+- **alternative.me** `/fng/` (`ENABLE_FEAR_GREED`) → indice Fear & Greed [0,100] + classification.
+
+**Données réelles uniquement** (règle absolue PR2) : parsers **purs et testés** (`parse_coingecko_global`/`parse_defillama_chains`/`parse_fng`/`fng_band`) renvoient `None` si la réponse est inutilisable → le hub ne publie **jamais** un zéro/vide comme une lecture. Chaque source porte `real`/`stale`/`error`/`age_ms` : jamais répondue ⇒ `real=false` + valeurs nulles (UI `n/a`) ; défaillance transitoire ⇒ **dernière bonne valeur conservée** (jamais blanchie). `ENABLE_COINGECKO` est **repurposé** (ancien worker fantôme jamais câblé → sous-toggle macro CoinGecko, défaut True).
+
+- **Endpoints** : `GET /api/market/global` (3 blocs `market`/`defi`/`sentiment`). Blocs ajoutés à `GET /api/market/source` (`global`) et `GET /api/health` (`global_context`). `GET /api/binance/config` expose `global_context_enabled`.
+- **Front** : **barre macro** (`#macro-bar`, sous la barre portefeuille) — Total Mkt Cap, 24h Volume, Dominance BTC/ETH, var. mcap 24h, DeFi TVL, Fear & Greed + sources live ; `fetchGlobalContext()` poll 30 s ; cellule indisponible = `n/a` (jamais fabriquée), valeur périmée atténuée ; barre masquée si désactivé.
+- **Observabilité** (`/metrics`) : `global_context_refresh_total{source}`, `global_context_refresh_errors_total{source}`, `global_context_refresh_latency_ms{source}`, `global_total_market_cap_usd`, `global_btc_dominance_pct`, `global_defi_tvl_usd`, `global_fear_greed_index`.
+- **Config** (voir `.env`) : `ENABLE_GLOBAL_CONTEXT`, `ENABLE_COINGECKO`, `ENABLE_DEFILLAMA`, `ENABLE_FEAR_GREED`, `GLOBAL_CONTEXT_REFRESH_SECONDS`, `GLOBAL_CONTEXT_HTTP_TIMEOUT`, `GLOBAL_CONTEXT_STALE_MS`, `COINGECKO_API_BASE`, `COINGECKO_API_KEY` (Demo optionnelle), `DEFILLAMA_API_BASE`, `FEAR_GREED_API_BASE`. Tests offline : `tests/test_global_context.py` (parsers + honnêteté real-data-only : snapshot vide, dernière valeur conservée sur erreur, staleness, source désactivée).
+- **Tranches suivantes possibles** (non faites) : DeFi/DEX par protocole (DefiLlama/GeckoTerminal), on-chain (Etherscan/Glassnode, nécessite clés), extension news RSS.
+
 ### Supervisor & Ops / Terminals (PR2)
 Lancement unique du stack local (ne dépend plus de multiples terminaux Windows) :
 ```
@@ -280,7 +296,7 @@ $env:PYTHONPATH="."; python .\scripts\dev_supervisor.py
 | Redis | 6379 |
 
 ### Tests
-`pytest -q` (offline, pas de DB requise) : `test_scorer_thresholds`, `test_social_availability` (garde-fous anti-mock), `test_process_supervisor` (capture stdout/stderr + crash + traceback sur **vrais** subprocess), `test_ops_api` (logique Ops + routes), `test_launch_scripts` (tasks.json + scripts PowerShell valides), `test_engine_decimal`, `test_binance_spot` (hub temps réel + ranges/active-symbol/cache borné), `test_chart_live` (feed graphique : anti-freeze, statut CHART, isolation par symbole), `test_market_universe` (univers 300 : exclusions, score tendance, ranking), `test_deploy_config` (.dockerignore + durcissement compose + settings), `test_rss_collector` (parsing RSS 2.0/Atom réel, strip HTML, dates, anti-mock, politesse), `test_outcome_eval` (return/correctness/horizon — logique pure du backtest). **168 tests** au total. CI : `.github/workflows/ci.yml` (`pytest -q`) en plus de `docs-check`.
+`pytest -q` (offline, pas de DB requise) : `test_scorer_thresholds`, `test_social_availability` (garde-fous anti-mock), `test_process_supervisor` (capture stdout/stderr + crash + traceback sur **vrais** subprocess), `test_ops_api` (logique Ops + routes), `test_launch_scripts` (tasks.json + scripts PowerShell valides), `test_engine_decimal`, `test_binance_spot` (hub temps réel + ranges/active-symbol/cache borné), `test_chart_live` (feed graphique : anti-freeze, statut CHART, isolation par symbole), `test_market_universe` (univers 300 : exclusions, score tendance, ranking), `test_deploy_config` (.dockerignore + durcissement compose + settings), `test_rss_collector` (parsing RSS 2.0/Atom réel, strip HTML, dates, anti-mock, politesse), `test_outcome_eval` (return/correctness/horizon — logique pure du backtest), `test_global_context` (macro tier : parsers CoinGecko/DefiLlama/Fear&Greed + honnêteté real-data-only). **181 tests** au total. CI : `.github/workflows/ci.yml` (`pytest -q`) en plus de `docs-check`.
 
 ## Gestion automatique des terminaux par Claude
 
