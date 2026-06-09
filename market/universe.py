@@ -332,6 +332,7 @@ class BinanceUniverseHub:
         self._tickers: dict[str, UniverseTicker] = {}   # canonical → live ticker (bounded)
         self._universe_set: set[str] = set()            # current top-N membership
         self._valid_spot: Optional[set[str]] = None     # SPOT/TRADING set from exchangeInfo
+        self._spot_loading: bool = False                # exchangeInfo load in flight (off the paint path)
         self._exchange_info_count: int = 0              # # of SPOT/TRADING pairs for this quote
         self._ranked: list[dict] = []                   # cached ranked rows (last GOOD snapshot)
         self.connected: bool = False
@@ -430,9 +431,19 @@ class BinanceUniverseHub:
                              universe_symbols_eligible)
         universe_refresh_total.inc()
         t0 = time.time()
+        # The 24h ticker is the ONLY hard dependency for the first paint. The SPOT
+        # filter (exchangeInfo) is a LARGE/slow response, so it must NOT be awaited
+        # on the paint path — awaiting both (even concurrently) bounds the paint by
+        # the SLOWER leg, i.e. the full exchangeInfo timeout on a cold start. Instead
+        # load exchangeInfo ONCE in the background (_load_valid_spot_bg); when it
+        # lands it applies the filter and rebuilds the top-N. Until then the first
+        # paint ranks with no spot filter (the liquidity / stable / leverage /
+        # active filters still apply) — honest real Binance rows, just not yet
+        # narrowed to SPOT/TRADING. Time-to-first-paint is bounded by ONE 24h call.
+        if self._valid_spot is None and not self._spot_loading:
+            self._spot_loading = True
+            asyncio.create_task(self._load_valid_spot_bg())
         try:
-            if self._valid_spot is None:
-                self._valid_spot = await asyncio.to_thread(self._load_valid_spot)
             rows = await asyncio.to_thread(
                 _http_get_json_with_fallbacks, self._rest_bases, "/api/v3/ticker/24hr", {}, self.rest_timeout
             )
@@ -503,6 +514,29 @@ class BinanceUniverseHub:
                     "(excl stable=%d lev=%d lowvol=%d not_spot=%d) in %.0fms",
                     len(ranked), len(candidates), raw_count, rejected["stable"],
                     rejected["leverage"], rejected["low_volume"], rejected["not_spot"], latency_ms)
+
+    async def _load_valid_spot_bg(self) -> None:
+        """Load the SPOT/TRADING set (exchangeInfo) OFF the first-paint critical path.
+
+        On success it sets the spot filter and rebuilds the full top-N so any
+        non-spot row that slipped into the first (unfiltered) paint is dropped and
+        the universe refills with proper SPOT pairs — without ever delaying the
+        first paint. On failure ``_valid_spot`` stays ``None`` and a later refresh
+        retries (the universe keeps painting unfiltered meanwhile)."""
+        try:
+            spot = await asyncio.to_thread(self._load_valid_spot)
+            if spot:
+                self._valid_spot = spot
+                self._spot_loading = False
+                logger.info("[universe] exchangeInfo loaded (%d spot pairs); applying spot filter", len(spot))
+                # Rebuild the top-N with the filter applied (re-fetches the 24h
+                # snapshot, which is cheap relative to exchangeInfo). _refresh sees
+                # _valid_spot set now, so it will not re-trigger this loader.
+                await self._refresh()
+        except Exception as e:  # best-effort: never let the background loader crash silently
+            logger.warning("[universe] background exchangeInfo load failed: %s", e)
+        finally:
+            self._spot_loading = False
 
     def _load_valid_spot(self) -> Optional[set[str]]:
         """SPOT + TRADING pairs for the configured quote, from exchangeInfo."""

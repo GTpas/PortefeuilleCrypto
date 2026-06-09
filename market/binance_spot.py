@@ -39,6 +39,7 @@ import math
 import time
 import urllib.parse
 import urllib.request
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -218,6 +219,7 @@ def parse_agg_trade(d: dict) -> TradeEvent:
 
 
 def parse_ticker(d: dict) -> TickerEvent:
+    """Parse a WS ``<sym>@ticker`` (24hrTicker) payload (compact field names)."""
     return TickerEvent(
         native_symbol=d["s"],
         last=float(d["c"]),
@@ -233,6 +235,42 @@ def parse_ticker(d: dict) -> TickerEvent:
         best_bid=float(d["b"]),
         best_ask=float(d["a"]),
         ts_event_ms=int(d.get("E") or d.get("C") or 0),
+    )
+
+
+def _rf(d: dict, key: str, default: float = 0.0) -> float:
+    """Tolerant float read for REST payloads (missing/garbage field → default)."""
+    try:
+        return float(d.get(key))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def parse_rest_ticker_24hr(d: dict) -> TickerEvent:
+    """
+    Parse a REST ``/api/v3/ticker/24hr`` response into a TickerEvent.
+
+    The REST payload uses VERBOSE field names (``lastPrice``, ``priceChange`` …),
+    NOT the compact WS stream names (``c``, ``p`` …) that ``parse_ticker`` expects.
+    Calling ``parse_ticker`` on a REST dict raised ``KeyError: 's'`` — the
+    "24h ticker init failed for … : 's'" warning. This parser maps the REST shape
+    so the initial 24h stats seed correctly before the live ``@ticker`` arrives.
+    """
+    return TickerEvent(
+        native_symbol=str(d.get("symbol", "")),
+        last=_rf(d, "lastPrice"),
+        price_change=_rf(d, "priceChange"),
+        price_change_pct=_rf(d, "priceChangePercent"),
+        weighted_avg=_rf(d, "weightedAvgPrice"),
+        open=_rf(d, "openPrice"),
+        high=_rf(d, "highPrice"),
+        low=_rf(d, "lowPrice"),
+        volume_base=_rf(d, "volume"),
+        volume_quote=_rf(d, "quoteVolume"),
+        num_trades=int(_rf(d, "count")),
+        best_bid=_rf(d, "bidPrice"),
+        best_ask=_rf(d, "askPrice"),
+        ts_event_ms=int(_rf(d, "closeTime")),
     )
 
 
@@ -325,6 +363,52 @@ def book_mid(bid: float, ask: float) -> Optional[float]:
     if not bid or not ask or bid <= 0 or ask <= 0:
         return None
     return (bid + ask) / 2.0
+
+
+def compute_trade_pressure(trades, now_ms: int, window_ms: int) -> Optional[float]:
+    """
+    Rolling buy-vs-sell notional imbalance in [-1, +1] over the last ``window_ms``.
+
+    Each entry is ``(ts_ms, price, qty, is_buyer_maker)``. Binance's ``m`` flag
+    (is_buyer_maker) is True when the BUYER was the maker — i.e. the aggressor was
+    a SELLER (sell-side volume); False → the aggressor BOUGHT (buy-side volume).
+    Pure / testable. Returns None when there is no trade in the window.
+    """
+    cutoff = now_ms - window_ms
+    buy = sell = 0.0
+    for ts, price, qty, is_buyer_maker in trades:
+        if ts < cutoff:
+            continue
+        notional = price * qty
+        if is_buyer_maker:
+            sell += notional
+        else:
+            buy += notional
+    tot = buy + sell
+    if tot <= 0:
+        return None
+    return (buy - sell) / tot
+
+
+def compute_relative_volume(kline_vol: Optional[float], ticker_vol_24h: Optional[float],
+                            interval_ms: Optional[int]) -> Optional[float]:
+    """
+    Current-interval base volume vs the 24h average per-interval volume.
+
+    ~1.0 = a normal interval, >1 = unusually active, <1 = quiet. Because the live
+    kline is usually the in-progress (not-yet-closed) bucket, early in an interval
+    this reads below 1 by construction — standard RVOL behavior. Pure / testable.
+    Returns None when the 24h volume or interval is unknown/zero.
+    """
+    if not ticker_vol_24h or ticker_vol_24h <= 0 or not interval_ms or interval_ms <= 0:
+        return None
+    if kline_vol is None:
+        return None
+    intervals_per_day = 86_400_000.0 / interval_ms
+    avg_per_interval = ticker_vol_24h / intervals_per_day
+    if avg_per_interval <= 0:
+        return None
+    return kline_vol / avg_per_interval
 
 
 # ── Order book ───────────────────────────────────────────────────────────────
@@ -453,6 +537,12 @@ class SymbolState:
     kline: Optional[KlineEvent] = None
     order_book: OrderBook = field(default_factory=OrderBook)
 
+    # Rolling window of recent trades — (ts_ms, price, qty, is_buyer_maker) — used
+    # to compute live trade_pressure for the SELECTED symbol (Tier 3 only, so this
+    # is never allocated for the 300-row Tier-1 universe). Bounded by maxlen.
+    recent_trades: deque = field(default_factory=lambda: deque(maxlen=4000))
+    trade_pressure_window_ms: int = 60_000
+
     # bookkeeping
     last_event_ms: Optional[int] = None      # max Binance event time seen
     last_recv_ms: Optional[int] = None       # local wall-clock of last event
@@ -548,6 +638,11 @@ class SymbolState:
             bid, ask = self.ticker.best_bid, self.ticker.best_ask
         else:
             bid = ask = None
+        # Live trade pressure (rolling buy/sell from @trade) and relative volume
+        # (current kline vs the 24h per-interval average) — derived from streams the
+        # hub already receives for the selected symbol, so the cockpit shows real
+        # values instead of 'unavail' for these two cells. None → honest 'unavail'.
+        interval_ms = INTERVAL_MS.get(self.kline.interval) if self.kline else None
         out = {
             "bid": bid,
             "ask": ask,
@@ -558,6 +653,12 @@ class SymbolState:
             "imbalance": ob.imbalance(10.0) if ob.synced else None,
             "slippage_bps_est": ob.slippage_bps_est(10000.0, "buy") if ob.synced else None,
             "book_synced": ob.synced,
+            "trade_pressure": compute_trade_pressure(
+                self.recent_trades, self._now_ms(), self.trade_pressure_window_ms),
+            "relative_volume": compute_relative_volume(
+                self.kline.volume_base if self.kline else None,
+                self.ticker.volume_base if self.ticker else None,
+                interval_ms),
         }
         return out
 
@@ -627,6 +728,9 @@ class SymbolState:
 
     def on_trade(self, ev: TradeEvent) -> None:
         self.trade = ev
+        # Feed the rolling buffer from @trade only (per-execution stream) so each
+        # trade is counted once — @aggTrade would double-count the same fills.
+        self.recent_trades.append((ev.ts_event_ms, ev.price, ev.qty, ev.is_buyer_maker))
         self._touch(ev.ts_event_ms)
 
     def on_agg_trade(self, ev: TradeEvent) -> None:
@@ -1048,7 +1152,12 @@ class BinanceSpotHub:
             count("ticker")
         elif etype == "kline":
             ev = parse_kline(data)
-            if st:
+            # Interval guard: after an interval/range switch the socket may still
+            # drain an in-flight kline of the OLD interval before the (re)subscribe
+            # takes effect. Dropping any kline whose interval != the expected one
+            # keeps the cache single-interval and chart_status honest (no 1m candle
+            # landing in a 5m cache, no false 'live' for the wrong interval).
+            if st and ev.interval == self.candle_interval:
                 st.on_kline(ev)
                 self._update_kline_cache(canonical, ev)
                 self._log_kline(canonical, ev)
@@ -1156,9 +1265,11 @@ class BinanceSpotHub:
                 {"symbol": to_upper_native(symbol)},
             )
             # Only seed if the live stream has not already produced a ticker.
+            # NOTE: REST /api/v3/ticker/24hr uses verbose field names, so it MUST be
+            # parsed with parse_rest_ticker_24hr (parse_ticker is for the WS stream).
             st = self.states[symbol]
             if st.ticker is None:
-                st.on_ticker(parse_ticker(d))
+                st.on_ticker(parse_rest_ticker_24hr(d))
         except Exception as e:
             logger.warning("[binance_spot] 24h ticker init failed for %s: %s", symbol, e)
 

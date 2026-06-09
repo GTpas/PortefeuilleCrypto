@@ -519,6 +519,14 @@ async function switchSymbol(symbol) {
     if (ws) { try { ws.close(); } catch (e) {} }
     currentSymbol = symbol;
     document.getElementById('current-symbol').textContent = symbol;
+    // Seed the header with the last-known price/change from the universe row (real
+    // Binance 24h ticker data) so the price isn't blank '--' during the brief
+    // warm-up while the live feed connects — avoids a false 'disconnected' look.
+    const seed = universe.bySymbol.get(symbol);
+    if (seed && seed.price != null) {
+        updateCurrentPrice(seed.price, (seed.change_pct ?? 0) >= 0);
+        if (seed.change_pct != null) updateChange(seed.change_pct);
+    }
     chartReset(symbol);
     setChartStatusBadge('nocandles');
     syncFavCurrent();
@@ -590,7 +598,7 @@ async function loadChart(symbol, range, switching) {
 
 // ── WebSocket (price + live candle feed for the selected symbol) ─────────────
 const WAIT_DATA_MS = 6000;
-const feedState = { connected: false, gotData: false, lastMsgAt: 0, symbol: '' };
+const feedState = { connected: false, gotData: false, lastMsgAt: 0, openedAt: 0, symbol: '' };
 let feedWatchdog = null;
 
 function setFeedBadge(state, ageMs) {
@@ -616,6 +624,7 @@ function badgeFromFeedStatus(feedStatus) {
 
 function connectWebSocket(symbol) {
     feedState.connected = false; feedState.gotData = false; feedState.symbol = symbol;
+    feedState.openedAt = Date.now();
     setFeedBadge('connecting');
     ws = new WebSocket(`${WS_URL}/${encodeURIComponent(symbol)}`);
 
@@ -628,14 +637,26 @@ function connectWebSocket(symbol) {
 
             if (msg.type === 'nodata') {
                 feedState.gotData = false;
-                setFeedBadge('nodata');
-                updateCurrentPriceUnavailable();
+                // During the post-switch warm-up the freshly-selected symbol has no
+                // Binance event yet — show a neutral 'waiting' and KEEP the seeded
+                // price instead of a red 'No data' flash on every symbol switch.
+                // After the grace window, report unavailability honestly.
+                if (Date.now() - feedState.openedAt < WAIT_DATA_MS) {
+                    setFeedBadge('waiting');
+                } else {
+                    setFeedBadge('nodata');
+                    updateCurrentPriceUnavailable();
+                }
                 return;
             }
             if (msg.type === 'live') {
                 lastLiveSnap = msg;
                 const price = msg.displayed_price;
-                if (price == null) { setFeedBadge('nodata'); updateCurrentPriceUnavailable(); return; }
+                if (price == null) {
+                    if (Date.now() - feedState.openedAt < WAIT_DATA_MS) { setFeedBadge('waiting'); }
+                    else { setFeedBadge('nodata'); updateCurrentPriceUnavailable(); }
+                    return;
+                }
                 feedState.gotData = true;
                 const isUp = msg.candle ? (msg.candle.close >= msg.candle.open) : (msg.ticker ? msg.ticker.price_change >= 0 : true);
                 updateCurrentPrice(price, isUp);
@@ -792,34 +813,38 @@ function applyLiveMicrostructure(m) {
     setMicro('micro-depth', m.depth_usd_10bps, 5000, 1000, v => '$' + v.toLocaleString('en-US', { maximumFractionDigits: 0 }));
     setMicro('micro-imbalance', m.imbalance, 0.1, -0.1, v => (v >= 0 ? '+' : '') + v.toFixed(3));
     setMicro('micro-slippage', m.slippage_bps_est, 5, 20, v => v.toFixed(1) + ' bps', true);
+    // Trade pressure + relative volume now stream live from the hub for the selected
+    // symbol (computed from @trade / @kline / @ticker) — real values, no more 'unavail'.
+    setMicro('micro-pressure', m.trade_pressure, 0.1, -0.1, v => (v >= 0 ? '+' : '') + v.toFixed(3));
+    setMicro('micro-relvol', m.relative_volume, 1.5, 0.5, v => v.toFixed(1) + 'x');
 }
 async function updateMicrostructure(symbol) {
     if (!symbol) symbol = currentSymbol;
     if (!symbol) return;
+    // When the live hub is streaming this symbol, the WS path (applyLiveMicro-
+    // structure) owns ALL six cells with real-time values — skip the DB poll
+    // entirely (it would flicker live values back to 'unavail'/DB on each tick).
     const liveActive = liveConfig.enabled && lastLiveSnap && lastLiveSnap.symbol === symbol;
+    if (liveActive) return;
     try {
         const res = await fetch(`${API_URL}/market-features/${encodeURIComponent(symbol)}`);
         const d = await res.json();
         if (!d || d.error) {
-            // Honest unavailability with a reason — not a silent n/a. The live hub
-            // (selected symbol) feeds spread/depth/imbalance/slippage when active;
-            // pressure/relvol come only from the DB feature row (aggregated trades).
-            if (!liveActive) {
-                setMicroUnavail('micro-spread', 'unavail', 'no live book — select this symbol to stream its bookTicker');
-                setMicroUnavail('micro-depth', 'unavail', 'no live order book for this symbol (L2 only for the selected symbol)');
-                setMicroUnavail('micro-imbalance', 'unavail', 'no live book/depth for this symbol');
-                setMicroUnavail('micro-slippage', 'unavail', 'needs live depth — unavailable without the selected-symbol order book');
-            }
-            setMicroUnavail('micro-pressure', 'unavail', 'no aggregated-trade feature row yet (insufficient recent trades)');
+            // Honest unavailability with a reason — not a silent n/a. The DB feature
+            // row exists only for the core ACTIVE_SYMBOLS; for any other symbol that
+            // isn't currently streaming, these are genuinely unavailable.
+            setMicroUnavail('micro-spread', 'unavail', 'no live book — select this symbol to stream its bookTicker');
+            setMicroUnavail('micro-depth', 'unavail', 'no live order book for this symbol (L2 only for the selected symbol)');
+            setMicroUnavail('micro-imbalance', 'unavail', 'no live book/depth for this symbol');
+            setMicroUnavail('micro-slippage', 'unavail', 'needs live depth — unavailable without the selected-symbol order book');
+            setMicroUnavail('micro-pressure', 'unavail', 'select this symbol to stream its live trades (or no aggregated-trade feature row)');
             setMicroUnavail('micro-relvol', 'unavail', 'insufficient 24h volume history to compute relative volume');
             return;
         }
-        if (!liveActive) {
-            setMicro('micro-spread', d.spread_bps, 3, 10, v => v.toFixed(1) + ' bps', true);
-            setMicro('micro-depth', d.depth_usd_10bps, 5000, 1000, v => '$' + v.toLocaleString('en-US', { maximumFractionDigits: 0 }));
-            setMicro('micro-imbalance', d.book_imbalance, 0.1, -0.1, v => (v >= 0 ? '+' : '') + v.toFixed(3));
-            setMicro('micro-slippage', d.slippage_bps_est, 5, 20, v => v.toFixed(1) + ' bps', true);
-        }
+        setMicro('micro-spread', d.spread_bps, 3, 10, v => v.toFixed(1) + ' bps', true);
+        setMicro('micro-depth', d.depth_usd_10bps, 5000, 1000, v => '$' + v.toLocaleString('en-US', { maximumFractionDigits: 0 }));
+        setMicro('micro-imbalance', d.book_imbalance, 0.1, -0.1, v => (v >= 0 ? '+' : '') + v.toFixed(3));
+        setMicro('micro-slippage', d.slippage_bps_est, 5, 20, v => v.toFixed(1) + ' bps', true);
         setMicro('micro-pressure', d.trade_pressure, 0.1, -0.1, v => (v >= 0 ? '+' : '') + v.toFixed(3));
         setMicro('micro-relvol', d.relative_volume, 1.5, 0.5, v => v.toFixed(1) + 'x');
     } catch (e) { /* silent */ }
@@ -1293,9 +1318,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     setupRangeControls();
     setupFavCurrent();
 
-    await loadLiveConfig();          // ranges, limits, sources
-    await updateCoreWatchlist();     // core overlay (signals/price) + fallback rows
-    await fetchUniverse();           // 300 trending rows (light tier)
+    await loadLiveConfig();          // ranges, limits, sources (needed first)
+    // Core overlay and the 300-row universe are independent — fetch them IN PARALLEL
+    // so the universe no longer waits behind the watchlist round-trip. Combined with
+    // the backend painting the universe from the single 24h call (exchangeInfo loads
+    // off the critical path), the full list appears in seconds, not >10s.
+    await Promise.all([updateCoreWatchlist(), fetchUniverse()]);
 
     const def = liveConfig.active_symbol || (liveConfig.symbols && liveConfig.symbols[0]) ||
         (universe.rows[0] && universe.rows[0].symbol);

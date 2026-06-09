@@ -14,8 +14,10 @@ import asyncio
 import pytest
 
 from market.binance_spot import (
-    parse_trade, parse_agg_trade, parse_ticker, parse_book_ticker, parse_kline,
+    parse_trade, parse_agg_trade, parse_ticker, parse_rest_ticker_24hr,
+    parse_book_ticker, parse_kline,
     parse_depth_update, parse_rest_klines, spread_bps, book_mid,
+    compute_trade_pressure, compute_relative_volume,
     OrderBook, DepthUpdate, SymbolState, BinanceSpotHub, PRICE_SOURCES,
     normalize_range, range_to_interval, klines_limit_for_range, VALID_INTERVALS,
 )
@@ -66,6 +68,35 @@ def test_parse_ticker():
     assert ev.volume_quote == 1747670449.94
     assert ev.num_trades == 1234567
     assert ev.best_bid == 63185.93 and ev.best_ask == 63185.95
+
+
+def test_parse_rest_ticker_24hr():
+    # REST /api/v3/ticker/24hr uses VERBOSE keys — parse_ticker (WS shape) would
+    # raise KeyError 's' on this. parse_rest_ticker_24hr maps the REST shape.
+    ev = parse_rest_ticker_24hr({
+        "symbol": "BTCUSDT", "priceChange": "1681.93", "priceChangePercent": "2.730",
+        "weightedAvgPrice": "63000.0", "lastPrice": "63185.94", "openPrice": "61504.01",
+        "highPrice": "64234.68", "lowPrice": "61500.00", "volume": "27589.58",
+        "quoteVolume": "1747670449.94", "count": 1234567,
+        "bidPrice": "63185.93", "askPrice": "63185.95", "closeTime": 1700000000000,
+    })
+    assert ev.native_symbol == "BTCUSDT"
+    assert ev.last == 63185.94
+    assert ev.price_change == 1681.93
+    assert ev.price_change_pct == 2.730
+    assert ev.high == 64234.68
+    assert ev.volume_base == 27589.58
+    assert ev.volume_quote == 1747670449.94
+    assert ev.num_trades == 1234567
+    assert ev.best_bid == 63185.93 and ev.best_ask == 63185.95
+    assert ev.ts_event_ms == 1700000000000
+
+
+def test_parse_rest_ticker_24hr_tolerates_missing_fields():
+    # Thinly-traded symbols can omit bid/ask; parser must default, not raise.
+    ev = parse_rest_ticker_24hr({"symbol": "ABCUSDT", "lastPrice": "1.0", "quoteVolume": "100"})
+    assert ev.native_symbol == "ABCUSDT" and ev.last == 1.0
+    assert ev.best_bid == 0.0 and ev.best_ask == 0.0 and ev.num_trades == 0
 
 
 def test_parse_book_ticker():
@@ -412,3 +443,76 @@ def test_set_active_and_range_applies_both():
     assert hub.has_symbol("ETH/USDT") and hub.active_symbol == "ETH/USDT"
     assert hub.candle_interval == "15m"
     assert res["reconnect"] is True and res["range"] == "7D"
+
+
+# ── Kline interval guard (no wrong-interval candle slips in during a switch) ──
+
+def test_kline_interval_guard_drops_wrong_interval():
+    hub = BinanceSpotHub(["BTC/USDT"], candle_interval="1m")
+    # An in-flight OLD-interval kline (5m while the hub expects 1m) must be dropped:
+    # no cache entry, no live kline state, chart_status stays honest.
+    hub._handle_message(_kline_msg("BTCUSDT", 60000, 5.0, "5m"))
+    assert hub.klines("BTC/USDT") == []
+    assert hub.states["BTC/USDT"].kline is None
+    # The expected-interval kline is applied.
+    hub._handle_message(_kline_msg("BTCUSDT", 60000, 2.0, "1m"))
+    assert hub.klines("BTC/USDT")
+    assert hub.states["BTC/USDT"].kline.close == 2.0
+
+
+# ── Live trade pressure (rolling buy/sell from @trade) ───────────────────────
+
+def test_compute_trade_pressure_buy_sell_mixed():
+    now = 1_000_000
+    # is_buyer_maker=False → aggressor BOUGHT (buy); True → aggressor SOLD (sell).
+    assert compute_trade_pressure([(now, 100.0, 1.0, False)] * 2, now, 60_000) == 1.0
+    assert compute_trade_pressure([(now, 100.0, 1.0, True)] * 2, now, 60_000) == -1.0
+    mixed = [(now, 100.0, 3.0, False), (now, 100.0, 1.0, True)]   # buy 300, sell 100
+    assert compute_trade_pressure(mixed, now, 60_000) == pytest.approx((300 - 100) / 400, rel=1e-9)
+
+
+def test_compute_trade_pressure_windowing_and_empty():
+    now = 1_000_000
+    trades = [(now - 120_000, 100.0, 5.0, False),   # outside 60s window → ignored
+              (now - 1_000, 100.0, 1.0, True)]        # inside → sell
+    assert compute_trade_pressure(trades, now, 60_000) == -1.0
+    assert compute_trade_pressure([], now, 60_000) is None
+    # everything outside the window → None (no fabricated value)
+    assert compute_trade_pressure([(now - 120_000, 100.0, 1.0, False)], now, 60_000) is None
+
+
+# ── Live relative volume (current interval vs 24h per-interval average) ───────
+
+def test_compute_relative_volume():
+    # 1m interval → 1440 intervals/day; vol_24h=1440 → avg per interval = 1.0
+    assert compute_relative_volume(1.0, 1440.0, 60_000) == pytest.approx(1.0, rel=1e-9)
+    assert compute_relative_volume(2.0, 1440.0, 60_000) == pytest.approx(2.0, rel=1e-9)
+    # missing/zero inputs → None (never fabricated)
+    assert compute_relative_volume(None, 1440.0, 60_000) is None
+    assert compute_relative_volume(1.0, 0.0, 60_000) is None
+    assert compute_relative_volume(1.0, 1440.0, None) is None
+
+
+def test_microstructure_exposes_live_pressure_and_relvol():
+    st = SymbolState(symbol="BTC/USDT", native_symbol="BTCUSDT")
+    now = st._now_ms()
+    # buy 200 (2@100) vs sell 100 (1@100) → +1/3
+    st.on_trade(parse_trade({"s": "BTCUSDT", "p": "100.0", "q": "2", "T": now, "m": False, "t": 1}))
+    st.on_trade(parse_trade({"s": "BTCUSDT", "p": "100.0", "q": "1", "T": now, "m": True, "t": 2}))
+    # kline base vol 10 + ticker 24h base vol 14400 (1m → 1440 intervals → avg 10) → relvol 1.0
+    st.on_kline(parse_kline({"s": "BTCUSDT", "E": now, "k": {"t": 0, "T": 59999, "i": "1m", "o": "1",
+                            "c": "1", "h": "1", "l": "1", "v": "10", "q": "0", "n": 0, "x": False}}))
+    st.on_ticker(parse_ticker({"s": "BTCUSDT", "E": now, "p": "0", "P": "0", "w": "0", "c": "100",
+                               "o": "0", "h": "0", "l": "0", "v": "14400", "q": "0", "n": 0,
+                               "b": "0", "a": "0"}))
+    m = st.microstructure()
+    assert m["trade_pressure"] == pytest.approx((200 - 100) / 300, rel=1e-9)
+    assert m["relative_volume"] == pytest.approx(1.0, rel=1e-9)
+
+
+def test_microstructure_pressure_relvol_none_without_data():
+    # No trades / no kline / no ticker → both honestly None (never a fabricated value).
+    st = SymbolState(symbol="BTC/USDT", native_symbol="BTCUSDT")
+    m = st.microstructure()
+    assert m["trade_pressure"] is None
+    assert m["relative_volume"] is None

@@ -270,3 +270,56 @@ def test_universe_cache_returns_previous_snapshot_on_refresh_failure(monkeypatch
     # Snapshot is preserved verbatim, not blanked, on a transient failure.
     assert h.universe() == good
     assert h.debug()["last_error"] == "binance down"
+
+
+# ── Cold start: paint from the 24h call, never block on exchangeInfo ──────────
+
+def test_universe_paints_without_blocking_on_exchange_info(monkeypatch):
+    """The first paint must depend ONLY on the single 24h ticker call. A slow/large
+    exchangeInfo (the SPOT filter) must load OFF the critical path — never delay the
+    universe appearing. Regression guard for the cold-start (>10s) complaint."""
+    import asyncio
+    import time
+    import market.universe as U
+    monkeypatch.setattr(U, "_http_get_json", lambda url, params, timeout=12.0: _fake_rest_rows())
+    h = _hub()
+    # Simulate a SLOW exchangeInfo. If the paint awaited it, _refresh would block
+    # for ~the sleep; with the fix it returns as soon as the 24h call resolves.
+    def slow_spot():
+        time.sleep(0.6)
+        return {f"C{i:04d}/USDT" for i in range(305)}
+    h._load_valid_spot = slow_spot
+
+    async def run():
+        t0 = time.perf_counter()
+        await h._refresh()
+        return time.perf_counter() - t0
+    elapsed = asyncio.run(run())
+
+    assert elapsed < 0.3              # painted from the 24h call, NOT after the 0.6s exchangeInfo
+    assert len(h.universe()) == 300   # universe is populated immediately (no spot filter yet)
+
+
+def test_universe_applies_spot_filter_after_exchange_info_loads(monkeypatch):
+    """Once exchangeInfo lands in the background, the spot filter is applied and the
+    top-N is rebuilt — narrowing an initially-unfiltered paint to real SPOT pairs."""
+    import asyncio
+    import market.universe as U
+    monkeypatch.setattr(U, "_http_get_json", lambda url, params, timeout=12.0: _fake_rest_rows())
+    h = _hub()
+    valid = {f"C{i:04d}/USDT" for i in range(50)}   # only 50 of the 305 are valid SPOT
+    h._load_valid_spot = lambda: valid
+
+    async def run():
+        await h._refresh()                 # first paint: no spot filter yet
+        first = len(h.universe())
+        for _ in range(200):               # let the background loader apply + rebuild
+            await asyncio.sleep(0.01)
+            if h._valid_spot is not None and len(h.universe()) <= len(valid):
+                break
+        return first
+    first = asyncio.run(run())
+
+    assert first == 300                    # painted before the filter applied
+    assert h._valid_spot == valid          # exchangeInfo loaded in the background
+    assert len(h.universe()) == 50         # rebuilt, now narrowed to SPOT pairs
