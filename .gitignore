@@ -10,3 +10,5 @@ __pycache__/
 .DS_Store
 # Supervisor runtime artifacts (incidents, captured logs)
 logs/
+# Personal Claude Code overrides (permissions, etc.) — never shared
+.claude/settings.local.json
