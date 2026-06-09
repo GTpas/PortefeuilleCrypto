@@ -1,6 +1,6 @@
 # Base de données — PostgreSQL / TimescaleDB
 
-> Source de vérité : `db/migrations/001→007`. Montées **automatiquement au premier boot** du conteneur `db` (montées dans `/docker-entrypoint-initdb.d`). Pour rejouer sur une base existante, voir [§ Migrations](#migrations).
+> Source de vérité : `db/migrations/001→008`. Montées **automatiquement au premier boot** du conteneur `db` (montées dans `/docker-entrypoint-initdb.d`). Pour rejouer sur une base existante, voir [§ Migrations](#migrations).
 
 Toutes les migrations sont **idempotentes** (`CREATE ... IF NOT EXISTS`, gardes `DO $$`). Connexion par défaut : `postgresql://crypto_user:crypto_password@localhost:5432/crypto_market_data`.
 
@@ -92,6 +92,17 @@ Index clés : `(exchange_code, symbol, ts_event DESC)` sur trade/bbo ; GIN `payl
 | Consommateur | Lit (principales) |
 |---|---|
 | API cockpit | `decision_snapshot`, `decision_factor`, `signal_quality_audit`, `ohlcv_1s`, `market_feature_1s`, `social_signal_1m`, `paper_*`, `portfolio_state`, `system_log`, `content_entity`/`raw_content` |
+
+### Rapport conseil quotidien (migration 008 — index DB best-effort)
+
+> ⚠️ Les **fichiers** `reports/daily_crypto_report_YYYY-MM-DD.json|.md` sont la **source de vérité** (politique « pas de gros blobs en PG »). Ces tables sont un **miroir interrogeable** écrit best-effort par le `report_worker` / l'API. La même DDL est aussi exécutée au runtime (`reports.store.ensure_schema`) → fonctionne même sur une base où 008 n'a pas été rejouée.
+
+| Table | Rôle | Clé |
+|---|---|---|
+| `daily_crypto_report` | 1 ligne/jour : `market_regime`, compteurs `buy/hold/sell/avoid_count`, `summary`, `json_path`/`markdown_path`, `status`, `error_message` | `report_date` (PK) |
+| `daily_crypto_asset_score` | Score/prédiction par actif (prépare le **backtest** prédiction-vs-réalisé J+1/J+7) : `signal`, `rating`, `opportunity_score`, `risk_score`, `confidence_score`, `metrics_json`, `prediction_json`, `source_evidence_json` | `(report_date, symbol)` (PK) |
+
+Détail : [daily_crypto_report.md](daily_crypto_report.md).
 
 ## <a name="migrations"></a>Migrations
 

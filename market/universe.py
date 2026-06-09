@@ -109,6 +109,7 @@ class UniverseTicker:
     best_ask: float
     ts_ms: int           # event/close time (ms)
     recv_ms: int         # local receive time (ms)
+    weighted_avg_price: float = 0.0  # 24h VWAP (Binance `w`) — real volume-based signal
 
     def spread_bps(self) -> Optional[float]:
         if self.best_bid <= 0 or self.best_ask <= 0:
@@ -137,6 +138,14 @@ class UniverseTicker:
             "base": self.base,
             "quote": self.quote,
             "price": self.last,
+            # 24h OHLC + VWAP (additive): real Binance fields the daily report uses
+            # for volatility, intraday drawdown and volume confirmation. The cockpit
+            # reads only the keys it needs, so adding these is non-breaking.
+            "open": self.open,
+            "high": self.high,
+            "low": self.low,
+            "weighted_avg_price": self.weighted_avg_price,
+            "volatility_range": round(self.volatility_range(), 6),
             "change_pct": self.change_pct,
             "quote_volume": self.quote_volume,
             "base_volume": self.base_volume,
@@ -168,6 +177,7 @@ def parse_rest_24h(d: dict, quote: str) -> Optional[UniverseTicker]:
         num_trades=int(_f(d.get("count"))),
         best_bid=_f(d.get("bidPrice")), best_ask=_f(d.get("askPrice")),
         ts_ms=int(_f(d.get("closeTime"), now)), recv_ms=now,
+        weighted_avg_price=_f(d.get("weightedAvgPrice")),
     )
 
 
@@ -186,6 +196,7 @@ def parse_arr_ticker(d: dict, quote: str) -> Optional[UniverseTicker]:
         num_trades=int(_f(d.get("n"))),
         best_bid=_f(d.get("b")), best_ask=_f(d.get("a")),
         ts_ms=int(_f(d.get("E") or d.get("C"), now)), recv_ms=now,
+        weighted_avg_price=_f(d.get("w")),
     )
 
 

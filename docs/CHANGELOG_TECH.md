@@ -6,6 +6,15 @@ Format : `## [date] — titre court` puis **Quoi / Pourquoi / Impact**.
 
 ---
 
+## [2026-06-10] — Daily Crypto Intelligence Report (advisory tier, PR8)
+- **Quoi** : nouveau module **`reports/`** (display/report-only) + worker `workers/report_worker.py` générant un **rapport conseil crypto quotidien** (minuit, TZ configurable) sur les ~300 cryptos de l'univers : classement global, prédiction indicative prudente, signal **BUY/HOLD/SELL/AVOID**, ratios explicables, rating **A+→E**, explication pédagogique FR, source evidence réelle, historique.
+  - `reports/scoring.py` — formules **pures** centralisées (source unique de vérité) : ratios (momentum, volume-confirmation via percentile+VWAP, liquidité, force vs BTC, qualité tendance, volatilité, drawdown, market-context), Opportunity/Risk/Confidence `0–100`, rating, signal (AVOID→BUY→SELL→HOLD), `up_probability` **bornée [0.15,0.85]**.
+  - `reports/generator.py` — `build_daily_report()` (JSON) + `render_markdown()` (FR). `reports/store.py` — fichiers `reports/*.json|.md` = **source de vérité** + index DB best-effort.
+  - API : `GET /api/reports/daily/{latest,history,{date},latest/assets/{symbol}}` + `POST /generate` ; `config.daily_report_enabled` ; bloc `health.daily_report`. Migration **008** (`daily_crypto_report` + `daily_crypto_asset_score`, aussi `ensure_schema` au runtime). Métriques port **9107**. Front : modale **📅 Report** (filtres signal/rating, tri, recherche, détail).
+  - `market/universe.to_row()` expose `open/high/low/weighted_avg_price/volatility_range` (réels Binance 24h, additif non cassant) — consommés par le rapport.
+- **Pourquoi** : 1ʳᵉ brique « conseil » lisible pour non-expert, crédible et **honnête** (real-data-only) ; prépare le backtest prédiction-vs-réalisé (table `daily_crypto_asset_score`).
+- **Impact** : `reports/*`, `workers/report_worker.py`, `api/main.py`, `config.py`, `metrics.py`, `market/universe.py`, `db/migrations/008`, `scripts/dev_supervisor.py`, frontend, `.env`/`.gitignore`/`.dockerignore`. **Real data only** : 1h/7j/30j + market cap = `N/A` (confiance réduite, jamais fabriqué) ; prédictions = probabilités/scénarios, **pas un conseil financier**. Tests `tests/test_daily_report.py` (**237 tests** au total). Doc : `docs/daily_crypto_report.md`.
+
 ## [2026-06-10] — Refonte frontend cockpit (design system v3, layout robuste, a11y)
 - **Quoi** : refonte **visuelle et structurelle** du cockpit, **vanilla** (pas de React/Vite/build), **sans casser** endpoints/WS/anti-freeze chart.
   1. **`frontend/style.css` réécrit en design system v3** : tokens couleurs (surfaces/borders/texte/sémantiques up-down-warn-info-social-accent + tints), variables de layout (`--header-h`/`--portfolio-h`/`--macro-h`/`--activity-h`/`--left-w`/`--right-w`/`--panel-gap`/`--radius-card`/`--shadow-card`), utilitaires (`.metric-card`/`.metric-label`/`.metric-value`/`.data-chip`/`.skeleton`/`.truncate`/`.scroll-panel`). **Tous les noms de classes consommés par `app.js` sont préservés** ; `--up/--down` gardés identiques aux couleurs de série du chart.

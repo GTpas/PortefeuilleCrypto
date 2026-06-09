@@ -5,7 +5,7 @@
 Ordre de démarrage (le supervisor attend les `oneshot` avant la suite) :
 
 ```
-docker (oneshot) → bootstrap (oneshot) → ingestor → aggregator → feature_worker → social_ingestor → antigravity_bot → outcome_evaluator → api
+docker (oneshot) → bootstrap (oneshot) → ingestor → aggregator → feature_worker → social_ingestor → antigravity_bot → outcome_evaluator → report_worker → api
 ```
 
 | Worker | Type | Auto-restart | Port métriques |
@@ -17,6 +17,7 @@ docker (oneshot) → bootstrap (oneshot) → ingestor → aggregator → feature
 | `social_ingestor` | long-running | oui | 9103 |
 | `antigravity_bot` | long-running | oui | 9104 |
 | `outcome_evaluator` | long-running | oui | 9106 |
+| `report_worker` | long-running | oui | 9107 |
 | `api` (uvicorn) | long-running | oui | `/metrics` sur :8000 |
 
 ---
@@ -107,6 +108,17 @@ docker (oneshot) → bootstrap (oneshot) → ingestor → aggregator → feature
 - **Classes** : `ProcessSupervisor` (procs + deques events/incidents + subscribers), `ManagedProcess` (état par process : `status`, `pid`, `started_at`, `restarts`, `recent_logs` (200), `last_log`, `last_log_level`, `last_traceback`).
 - **Détection niveau** (`detect_level`) : token explicite prioritaire ; sinon, ligne stderr ressemblant à une exception → `ERROR`.
 - **Backoff** : `delay = min(30 s, 1 s × 2^restarts)` → 1, 2, 4, 8, 16, plafond 30 s.
+## `workers/report_worker.py`
+- **Rôle** : génère le **rapport conseil crypto quotidien** (advisory tier) sur les ~300 cryptos de l'univers. **Display/report-only** — ne touche ni le bot ni la persistance marché. Détail : [daily_crypto_report.md](daily_crypto_report.md).
+- **Entrées** : lit les tiers live via l'**API locale** (`GET /api/market/universe`, `/api/market/global` ; `DAILY_REPORT_API_BASE`). Config : `ENABLE_DAILY_REPORT`, `DAILY_REPORT_HOUR/MINUTE/TIMEZONE`, `DAILY_REPORT_UNIVERSE_LIMIT`, `DAILY_REPORT_TOP_N`, `DAILY_REPORT_DIR`, `DAILY_REPORT_PERSIST_DB`.
+- **Sorties** : fichiers `reports/daily_crypto_report_YYYY-MM-DD.json|.md` (**source de vérité**) + miroir DB best-effort (`daily_crypto_report` + `daily_crypto_asset_score`, migration 008 / `reports.store.ensure_schema`). Chiffres calculés par `reports.scoring` (pur) ; assemblage `reports.generator`.
+- **Cadence** : prochain minuit dans `DAILY_REPORT_TIMEZONE` (fallback UTC), dort par tranches (≤300 s, robuste au drift). Relance manuelle : `python -m workers.report_worker --once` ou `POST /api/reports/daily/generate` (génère depuis les hubs in-process).
+- **Métriques** (port 9107) : `daily_report_runs_total{trigger}`, `daily_report_errors_total`, `daily_report_build_latency_ms`, `daily_report_assets`, `daily_report_last_success_ts`, `daily_report_signal_counts{signal}`, `worker_last_success_ts{worker="report_worker"}`.
+- **Real data only** : univers vide ⇒ rapport `status='error'` + message explicite (jamais d'actif fabriqué) ; 1h/7j/30j et market cap = `N/A` ; prédictions bornées `[0.15,0.85]`.
+- **Commande** : `python -m workers.report_worker`.
+
+## Supervision (process_supervisor)
+
 - **Budget glissant** : `OPS_MAX_RESTARTS` (5) crashs dans `OPS_RESTART_WINDOW_S` (120 s) → statut `degraded` + incident `critical`, arrêt de l'auto-restart.
 - **Incident** : persisté `logs/ops_incidents.jsonl`, diffusé sur `/ws/ops`, passé au hook `ProcessSupervisor.on_incident` (point d'extension webhook/Claude — jamais fabriqué). Schéma : `incident_id`, `severity`, `process`, `error_type`, `exit_code`, `traceback`, `recent_logs`, `health_status`, `suspected_root_cause`, `recommended_action`.
 - **Statuts process** : `pending | starting | running | stopped | crashed | degraded | completed`.

@@ -171,6 +171,26 @@ class Settings(BaseSettings):
     OUTCOME_HOLD_BAND_PCT: float = Field(default=0.5, description="A HOLD decision counts as correct if |return| over the horizon stays within this band (%)")
     OUTCOME_PRICE_TOLERANCE_S: int = Field(default=300, description="Max gap (s) between the horizon target time and the nearest OHLCV close used as the horizon price")
 
+    # ── Daily Crypto Intelligence Report (advisory tier — display/report-only) ──
+    # A scheduled worker generates, once per day, a beginner-readable yet credible
+    # advisory report over the ~300-symbol universe: global ranking, prudent
+    # indicative predictions, explainable BUY/HOLD/SELL/AVOID signals, transparent
+    # ratios and an A+→E rating. Real data only (Binance 24h ticker + macro tier);
+    # unavailable inputs (1h/7d/30d change, market cap) are shown as N/A, never
+    # fabricated, and predictions are always framed as probabilities/scenarios.
+    # It is display/report-only — it never feeds the bot or the persistence path.
+    ENABLE_DAILY_REPORT: bool = Field(default=True, description="Run the scheduled daily-report worker (advisory report over the universe)")
+    DAILY_REPORT_HOUR: int = Field(default=0, description="Local hour (0-23) at which the daily report is generated")
+    DAILY_REPORT_MINUTE: int = Field(default=0, description="Local minute (0-59) at which the daily report is generated")
+    DAILY_REPORT_TIMEZONE: str = Field(default="UTC", description="IANA timezone for the generation schedule (e.g. UTC, Europe/Paris). Falls back to UTC if unavailable")
+    DAILY_REPORT_DIR: str = Field(default="reports", description="Directory (relative to repo root or absolute) where report JSON/Markdown artifacts are written")
+    DAILY_REPORT_UNIVERSE_LIMIT: int = Field(default=300, description="Max number of universe symbols included in the daily report")
+    DAILY_REPORT_TOP_N: int = Field(default=10, description="Length of the executive-summary top lists (top buy/sell/watchlist)")
+    DAILY_REPORT_HISTORY_LIMIT: int = Field(default=90, description="Max number of past reports returned by the history endpoint")
+    DAILY_REPORT_API_BASE: str = Field(default="http://127.0.0.1:8000", description="Base URL the report worker calls to read the live universe/macro tiers")
+    DAILY_REPORT_HTTP_TIMEOUT: float = Field(default=20.0, description="HTTP timeout (s) for the report worker's reads from the local API")
+    DAILY_REPORT_PERSIST_DB: bool = Field(default=True, description="Best-effort mirror the report index (+ per-asset scores) into Postgres (files remain the source of truth)")
+
     # Redis
     REDIS_URL: str = Field(default="redis://localhost:6379/0", description="Redis connection URL for queue/cache")
 
@@ -197,6 +217,7 @@ class Settings(BaseSettings):
     METRICS_PORT_BOT: int = Field(default=9104)
     METRICS_PORT_AGGREGATOR: int = Field(default=9105)
     METRICS_PORT_OUTCOME: int = Field(default=9106)
+    METRICS_PORT_REPORT: int = Field(default=9107)
 
     # Logging
     LOG_LEVEL: str = Field(default="INFO")

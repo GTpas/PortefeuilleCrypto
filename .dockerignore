@@ -32,8 +32,12 @@ logs/
 *.db
 ops_incidents.jsonl
 
-# Local reports / scratch (never needed in an image)
+# Local reports / scratch (never needed in an image). NB: only the GENERATED
+# daily-report artifacts are excluded — the reports/ Python package stays in the image.
 deep-research-report*.md
+reports/daily_crypto_report_*.json
+reports/daily_crypto_report_*.md
+reports/_index.json
 *.tmp
 
 # OS junk

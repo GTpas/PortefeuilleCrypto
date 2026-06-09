@@ -21,6 +21,7 @@
 
             <!-- TOP APP BAR -->
             <header class="app-bar">
+                <button id="toggle-left" class="tool-btn toggle-left" aria-label="Toggle market explorer" title="Show/hide market list">☰</button>
                 <div class="logo">
                     <div class="dot pulse" aria-hidden="true"></div>
                     <h1>Antigravity <span>Cockpit</span></h1>
@@ -39,8 +40,10 @@
                 <div class="tools-cluster" role="group" aria-label="Cockpit tools">
                     <button id="live-debug-btn" class="tool-btn" title="Compare raw Binance values vs the cockpit's displayed value" aria-label="Open source debug">🔬 <span class="tool-label">Source</span></button>
                     <button id="defi-btn" class="tool-btn" title="Top DeFi protocols by TVL (DefiLlama)" aria-label="Open DeFi protocols">🏦 <span class="tool-label">DeFi</span></button>
+                    <button id="report-btn" class="tool-btn" title="Rapport conseil crypto quotidien (300 cryptos) — analyse indicative, pas un conseil financier" aria-label="Open daily report">📅 <span class="tool-label">Report</span></button>
                     <button id="logs-btn" class="tool-btn" aria-label="Open system logs">📋 <span class="tool-label">Logs</span></button>
                     <button id="ops-btn" class="tool-btn" aria-label="Open ops terminals">🖥 <span class="tool-label">Ops</span></button>
+                    <button id="theme-toggle" class="tool-btn" aria-label="Toggle light or dark theme" title="Toggle light/dark theme">🌙</button>
                     <button id="toggle-right" class="tool-btn drawer-toggle" aria-label="Toggle decision panel" title="Show/hide decision panel">📊</button>
                 </div>
             </header>
@@ -197,6 +200,11 @@
                             <div class="skeleton skel-card"></div>
                         </div>
                     </div>
+                    <!-- Risk Gates (selected symbol's latest decision) -->
+                    <div class="panel-subtitle">Risk Gates</div>
+                    <div id="risk-gates" class="risk-gates">
+                        <div class="rg-empty">Select a symbol to see its risk gates.</div>
+                    </div>
                     <!-- Microstructure Block -->
                     <div class="panel-subtitle">Microstructure</div>
                     <div id="microstructure-container" class="microstructure-block">
@@ -207,6 +215,11 @@
                         <div class="micro-row"><span class="micro-label">Rel. Volume</span><span class="micro-value" id="micro-relvol">--</span></div>
                         <div class="micro-row"><span class="micro-label">Slippage Est.</span><span class="micro-value" id="micro-slippage">--</span></div>
                     </div>
+                    <!-- Source Quality (which data is real / mock / unavailable) -->
+                    <div class="panel-subtitle">Source Quality</div>
+                    <div id="source-quality" class="source-quality">
+                        <div class="sq-empty">Loading sources…</div>
+                    </div>
                 </div>
             </aside>
 
@@ -215,8 +228,14 @@
         <!-- ============ BOTTOM: Activity & Decisions ============ -->
         <div class="activity-feed">
             <div class="feed-header">
-                <span class="panel-title">Activity &amp; Decisions</span>
+                <div class="feed-tabs" id="feed-tabs" role="tablist" aria-label="Activity feed">
+                    <button data-feed="trades" class="active" title="Executed paper trades">Trades</button>
+                    <button data-feed="decisions" title="Latest bot decisions (core symbols)">Decisions</button>
+                    <button data-feed="errors" title="System errors &amp; warnings">Errors</button>
+                    <button data-feed="incidents" title="Ops supervisor incidents">Incidents</button>
+                </div>
                 <div class="feed-actions">
+                    <span id="feed-source" class="feed-source" title="Where this tab's data comes from">—</span>
                     <button id="docs-btn" class="tool-btn" aria-label="Open documentation">📖 <span class="tool-label">Docs</span></button>
                     <button id="timeline-btn" class="tool-btn" aria-label="Open decision timeline">🕐 <span class="tool-label">Timeline</span></button>
                 </div>
@@ -256,6 +275,96 @@
                     Source : <code>DefiLlama /protocols</code> (gratuit, sans clé). Catégories
                     <code>CEX</code>/<code>Chain</code> exclues (réserves d'exchange ≠ DeFi).
                     TVL DeFi globale dans la barre macro.
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- DAILY REPORT MODAL (advisory report over the 300-crypto universe) -->
+    <div id="report-modal" class="modal hidden" role="dialog" aria-modal="true" aria-label="Daily crypto report">
+        <div class="modal-content report-content">
+            <div class="modal-header">
+                <h2>📅 Rapport Crypto Quotidien</h2>
+                <div class="ops-header-right">
+                    <span id="report-status" class="status-badge disconnected" title="Date + régime de marché du dernier rapport">—</span>
+                    <button id="report-generate" class="tool-btn" title="Générer maintenant (test/admin)">Générer</button>
+                    <button id="close-report" class="close-btn" aria-label="Close">&times;</button>
+                </div>
+            </div>
+            <div class="modal-body report-body">
+                <div id="report-disclaimer" class="report-disclaimer">
+                    ⚠️ Analyse indicative et pédagogique. <strong>Ce n'est pas un conseil financier personnalisé.</strong>
+                    Les prédictions sont des probabilités/scénarios, jamais des certitudes.
+                </div>
+
+                <!-- Executive summary KPIs -->
+                <div id="report-kpis" class="report-kpis"></div>
+                <div id="report-summary" class="report-summary"></div>
+
+                <!-- Rating distribution -->
+                <div class="report-section-title">Distribution des ratings</div>
+                <div id="report-ratings" class="report-ratings"></div>
+
+                <!-- Top lists -->
+                <div class="report-tops">
+                    <div class="report-top-col">
+                        <div class="report-section-title">Top BUY</div>
+                        <div id="report-top-buy" class="report-top-list"></div>
+                    </div>
+                    <div class="report-top-col">
+                        <div class="report-section-title">Top SELL</div>
+                        <div id="report-top-sell" class="report-top-list"></div>
+                    </div>
+                    <div class="report-top-col">
+                        <div class="report-section-title">À surveiller</div>
+                        <div id="report-top-watch" class="report-top-list"></div>
+                    </div>
+                </div>
+
+                <!-- Detail panel (shown when a row is selected) -->
+                <div id="report-detail" class="report-detail hidden"></div>
+
+                <!-- Filters + ranking table -->
+                <div class="report-section-title">Classement des cryptos</div>
+                <div class="report-toolbar">
+                    <input id="report-search" type="text" autocomplete="off" spellcheck="false"
+                           placeholder="Rechercher un symbole…" aria-label="Rechercher un symbole">
+                    <div class="report-filters" id="report-signal-filters" role="group" aria-label="Filtre signal">
+                        <button data-sig="ALL" class="active">Tous</button>
+                        <button data-sig="BUY">BUY</button>
+                        <button data-sig="HOLD">HOLD</button>
+                        <button data-sig="SELL">SELL</button>
+                        <button data-sig="AVOID">AVOID</button>
+                    </div>
+                    <select id="report-rating-filter" aria-label="Filtre rating">
+                        <option value="ALL">Tous ratings</option>
+                        <option value="A+">A+</option><option value="A">A</option>
+                        <option value="B">B</option><option value="C">C</option>
+                        <option value="D">D</option><option value="E">E</option>
+                    </select>
+                    <select id="report-sort" aria-label="Trier par">
+                        <option value="opportunity_score">Tri : Opportunité</option>
+                        <option value="risk_score">Tri : Risque</option>
+                        <option value="quote_volume_24h">Tri : Volume</option>
+                        <option value="momentum">Tri : Momentum</option>
+                        <option value="confidence_score">Tri : Confiance</option>
+                        <option value="rank">Tri : Rang</option>
+                    </select>
+                    <span id="report-count" class="report-count">—</span>
+                </div>
+                <div class="report-table-wrap">
+                    <table class="report-table">
+                        <thead>
+                            <tr><th>#</th><th>Symbole</th><th>Prix</th><th>24h</th><th>Volume</th>
+                                <th>Signal</th><th>Rating</th><th>Opp.</th><th>Risque</th><th>Conf.</th><th>Horizon</th></tr>
+                        </thead>
+                        <tbody id="report-rows"></tbody>
+                    </table>
+                </div>
+                <div class="live-debug-hint">
+                    Source : univers <code>Binance Spot</code> (ticker 24h réel) + contexte macro.
+                    Horizons <code>1h/7j/30j</code> et <code>market cap</code> non fournis → <code>N/A</code>.
+                    Génération auto chaque jour ; relance manuelle via « Générer ».
                 </div>
             </div>
         </div>

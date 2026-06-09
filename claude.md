@@ -32,15 +32,16 @@ Deux chemins **séparés volontairement** (deux connexions Binance) :
 - **Persistance** (bot + historique) : `collectors → ingestor → db.writer → trade_tick/bbo_tick → aggregator → ohlcv_1s → agrégats continus`. Features : `feature_worker → market_feature_1s`. Décision : `antigravity_bot → scorer (market+social+risk) → decision_* → paper_trade`.
 - **Affichage** (cockpit, « collé à Binance UI ») : hubs in-process dans l'API — `binance_spot.py` (Tier 3 plein détail) + `universe.py` (Tier 1 ≤300, un seul `!ticker@arr`) + `global_context.py` (tier macro : total mcap / dominance / DeFi TVL / Fear & Greed) + `defi.py` (tier DeFi : top protocoles par TVL, DefiLlama) → `/ws/live`, `/api/market/*`, `/api/binance/*`. Sources macro/DeFi gratuites sans clé. Lectures DB d'affichage **pinnées** `DISPLAY_EXCHANGE`.
 - **Ops** : `dev_supervisor → process_supervisor` (Ops API :8050, `/ws/ops`) → panneau 🖥 Ops.
+- **Rapport conseil (advisory tier, display/report-only)** : `reports/` (scoring pur + generator JSON/Markdown + store fichiers) + `workers/report_worker.py` (génération minuit) → rapport quotidien sur les ~300 cryptos (`/api/reports/daily/*`, modale 📅 Report). Real-data-only ; ne nourrit ni le bot ni la persistance.
 
 Schéma complet : [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#2-schéma-des-flux-de-données).
 
 ### Rôle des dossiers (résumé)
-`collectors/` (WS par exchange) · `models/` (canonical + event_uid) · `db/` (writer batch+DLQ, migrations) · `workers/` (ingestor, aggregator, feature_worker, social_ingestor, antigravity_bot, bootstrap, process_supervisor) · `signal_engine/` (market_features, social_engine, risk_engine, scorer) · `paper_execution/` (engine) · `market/` (hubs binance_spot, universe) · `social/` (base, analyzer, mock) · `api/` (FastAPI + WS + hubs + cockpit statique) · `frontend/` (cockpit) · `scripts/` (supervisor + .ps1) · `tests/` (offline) · `docs/`.
+`collectors/` (WS par exchange) · `models/` (canonical + event_uid) · `db/` (writer batch+DLQ, migrations) · `workers/` (ingestor, aggregator, feature_worker, social_ingestor, antigravity_bot, outcome_evaluator, report_worker, bootstrap, process_supervisor) · `signal_engine/` (market_features, social_engine, risk_engine, scorer) · `paper_execution/` (engine) · `market/` (hubs binance_spot, universe, global_context, defi) · `reports/` (scoring pur, generator JSON/Markdown, store fichiers+index DB — daily report) · `social/` (base, analyzer, mock, rss) · `api/` (FastAPI + WS + hubs + cockpit statique) · `frontend/` (cockpit) · `scripts/` (supervisor + .ps1) · `tests/` (offline) · `docs/`.
 
 ### Repères rapides
-- **Workers** → [docs/WORKERS.md](docs/WORKERS.md). Lancement : `python -m workers.<nom>` (`PYTHONPATH=.`). Ordre supervisé : docker→bootstrap→ingestor→aggregator→feature_worker→social_ingestor→antigravity_bot→outcome_evaluator→api.
-- **Endpoints** → [docs/API.md](docs/API.md). Principaux : `/api/health`, `/api/watchlist`, `/api/signals`, `/api/decision/{id}`, `/api/market/universe`, `/api/binance/debug/{symbol}`, `WS /ws/live/{symbol}`. Ops sur :8050.
+- **Workers** → [docs/WORKERS.md](docs/WORKERS.md). Lancement : `python -m workers.<nom>` (`PYTHONPATH=.`). Ordre supervisé : docker→bootstrap→ingestor→aggregator→feature_worker→social_ingestor→antigravity_bot→outcome_evaluator→report_worker→api.
+- **Endpoints** → [docs/API.md](docs/API.md). Principaux : `/api/health`, `/api/watchlist`, `/api/signals`, `/api/decision/{id}`, `/api/market/universe`, `/api/binance/debug/{symbol}`, `/api/reports/daily/latest`, `WS /ws/live/{symbol}`. Ops sur :8050.
 - **Tables** → [docs/DATABASE.md](docs/DATABASE.md). Cœur : `trade_tick`, `bbo_tick`, `ohlcv_1s`, `market_feature_1s`, `decision_snapshot`/`decision_factor`/`signal_quality_audit`, `paper_portfolio`/`paper_position`/`paper_trade`, `portfolio_state`. ⚠️ pas de table `paper_order` (ordres = `paper_trade`).
 - **Variables d'env** → [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). Toutes dans `config.py`/`.env`. Jamais de secret en dur.
 - **Debug** → [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) : 1) `GET /api/health` 2) 🖥 Ops + `/api/ops/incidents` 3) 🔬 Source pour tout écart prix/chart.
@@ -257,6 +258,25 @@ Aucune logique aléatoire ne doit rester dans la chaîne décisionnelle finale.
 - **Config** (voir `.env`) : `ENABLE_DEFI_PROTOCOLS`, `DEFI_PROTOCOLS_LIMIT`, `DEFI_PROTOCOLS_MIN_TVL`, `DEFI_PROTOCOLS_REFRESH_SECONDS`, `DEFI_PROTOCOLS_STALE_MS`, `DEFI_EXCLUDE_CATEGORIES` (réutilise `DEFILLAMA_API_BASE`/`GLOBAL_CONTEXT_HTTP_TIMEOUT`). Tests : `tests/test_defi.py` (exclusion CEX/Chain, plancher TVL/sort/cap/rank, breakdown catégories, honnêteté hub vide).
 - **Tranches deep-research suivantes** (non faites) : on-chain (Etherscan/Glassnode, **nécessite clés** → secrets), extension news/sentiment RSS, agrégateurs prix (CoinGecko markets).
 
+### Daily Crypto Intelligence Report — advisory tier (PR8)
+**But** : un **rapport conseil crypto quotidien** (généré automatiquement à minuit) sur les **~300 cryptos** de l'univers, **compréhensible par un débutant** mais crédible financièrement. Détail complet : [docs/daily_crypto_report.md](docs/daily_crypto_report.md).
+
+**Module isolé `reports/`** (logique pure vs I/O, comme le reste du repo), **display/report-only** (ne nourrit jamais le bot ni la persistance marché) :
+- **`reports/scoring.py`** — formules **pures** centralisées (**source unique de vérité** des chiffres) : ratios (momentum, volume-confirmation via percentile+VWAP, liquidité, force vs BTC, qualité de tendance, volatilité, drawdown, market-context), **Opportunity Score** `0–100` (poids : momentum 25 / volume 20 / liquidité 20 / force-BTC 15 / trend 10 / macro 5 / confiance 5), **Risk Score** `0–100` (vol 30 / drawdown 25 / spread 15 / illiquidité 20 / données manquantes 10), **Confidence** (plafonnée car seul l'horizon 24h est réel), **rating A+→E**, **signal BUY/HOLD/SELL/AVOID** (ordre AVOID→BUY→SELL→HOLD), **prédiction** `up_probability` **bornée [0.15, 0.85]** (jamais 0/100 %).
+- **`reports/generator.py`** — `build_daily_report(rows, global_context, …)` → JSON structuré + `render_markdown()` → Markdown FR (résumé exécutif, classement, prédictions, ratios, source evidence, disclaimer « pas un conseil financier »).
+- **`reports/store.py`** — **fichiers = source de vérité** (`reports/daily_crypto_report_YYYY-MM-DD.json|.md`, gitignored) + **index DB best-effort** (`daily_crypto_report` + `daily_crypto_asset_score`, migration **008**, aussi créé au runtime via `ensure_schema`).
+
+**Real data only** (règle PR2) : le ticker Binance 24h fournit prix/%24h/volume/trades/spread/high-low/open/VWAP ; **1h/7j/30j et market cap = `N/A`** (réduisent la confiance, jamais fabriqués). Tier macro (`global_context`) fournit régime/Fear&Greed/mcap 24h.
+
+**Worker** `workers/report_worker.py` (supervisé) : prochain minuit dans `DAILY_REPORT_TIMEZONE` (fallback UTC), lit les tiers live via l'API locale, génère, persiste. Relance manuelle : `python -m workers.report_worker --once` ou `POST /api/reports/daily/generate` (génère depuis les hubs in-process). Métriques port **9107**.
+
+**Endpoints** (port 8000) : `GET /api/reports/daily/latest`, `GET /api/reports/daily/{date}`, `GET /api/reports/daily/history`, `POST /api/reports/daily/generate`, `GET /api/reports/daily/latest/assets/{symbol}`. `GET /api/binance/config.daily_report_enabled` + bloc `daily_report` dans `GET /api/health`.
+
+**Front** : bouton header **📅 Report** → modale « Rapport Crypto Quotidien » (résumé + KPIs, distribution des ratings, top BUY/SELL/à-surveiller, table **filtrable signal+rating / triable / recherchable** des 300, détail au clic avec prédiction & ratios). Disclaimer visible.
+
+**Config** (`.env`) : `ENABLE_DAILY_REPORT`, `DAILY_REPORT_HOUR/MINUTE/TIMEZONE`, `DAILY_REPORT_DIR`, `DAILY_REPORT_UNIVERSE_LIMIT`, `DAILY_REPORT_TOP_N`, `DAILY_REPORT_HISTORY_LIMIT`, `DAILY_REPORT_API_BASE`, `DAILY_REPORT_HTTP_TIMEOUT`, `DAILY_REPORT_PERSIST_DB`. Tests : `tests/test_daily_report.py`. **Amélioration future** : la table `daily_crypto_asset_score` prépare le backtest **prédiction-vs-réalisé** J+1/J+7 ; enrichissement 1h/7j/30j + market cap via CoinGecko markets ; export PDF/email/Telegram.
+- **Donnée additionnelle** : `market/universe.py` `to_row()` expose désormais `open`/`high`/`low`/`weighted_avg_price`/`volatility_range` (réels Binance 24h, additif non cassant) — consommés par le rapport.
+
 ### Supervisor & Ops / Terminals (PR2)
 Lancement unique du stack local (ne dépend plus de multiples terminaux Windows) :
 ```
@@ -305,12 +325,12 @@ $env:PYTHONPATH="."; python .\scripts\dev_supervisor.py
 |---|---|
 | API / cockpit | 8000 |
 | Ops supervisor (API + WS) | 8050 |
-| Prometheus workers | 9101–9106 |
+| Prometheus workers | 9101–9107 |
 | PostgreSQL/TimescaleDB | 5432 |
 | Redis | 6379 |
 
 ### Tests
-`pytest -q` (offline, pas de DB requise) : `test_scorer_thresholds`, `test_social_availability` (garde-fous anti-mock), `test_process_supervisor` (capture stdout/stderr + crash + traceback sur **vrais** subprocess), `test_ops_api` (logique Ops + routes), `test_launch_scripts` (tasks.json + scripts PowerShell valides), `test_engine_decimal`, `test_binance_spot` (hub temps réel + ranges/active-symbol/cache borné), `test_chart_live` (feed graphique : anti-freeze, statut CHART, isolation par symbole), `test_market_universe` (univers 300 : exclusions, score tendance, ranking), `test_deploy_config` (.dockerignore + durcissement compose + settings), `test_rss_collector` (parsing RSS 2.0/Atom réel, strip HTML, dates, anti-mock, politesse), `test_outcome_eval` (return/correctness/horizon — logique pure du backtest), `test_global_context` (macro tier : parsers CoinGecko/DefiLlama/Fear&Greed + honnêteté real-data-only), `test_defi` (tier DeFi : exclusion CEX/Chain, plancher TVL/ranking, breakdown catégories, honnêteté hub vide + `total=null` sur set vide + dernier snapshot sur échec), `test_decision_evidence` (assemblage `source_evidence` réel par groupe market/risk/social). **216 tests** au total. CI : `.github/workflows/ci.yml` (`pytest -q`) en plus de `docs-check`.
+`pytest -q` (offline, pas de DB requise) : `test_scorer_thresholds`, `test_social_availability` (garde-fous anti-mock), `test_process_supervisor` (capture stdout/stderr + crash + traceback sur **vrais** subprocess), `test_ops_api` (logique Ops + routes), `test_launch_scripts` (tasks.json + scripts PowerShell valides), `test_engine_decimal`, `test_binance_spot` (hub temps réel + ranges/active-symbol/cache borné), `test_chart_live` (feed graphique : anti-freeze, statut CHART, isolation par symbole), `test_market_universe` (univers 300 : exclusions, score tendance, ranking), `test_deploy_config` (.dockerignore + durcissement compose + settings), `test_rss_collector` (parsing RSS 2.0/Atom réel, strip HTML, dates, anti-mock, politesse), `test_outcome_eval` (return/correctness/horizon — logique pure du backtest), `test_global_context` (macro tier : parsers CoinGecko/DefiLlama/Fear&Greed + honnêteté real-data-only), `test_defi` (tier DeFi : exclusion CEX/Chain, plancher TVL/ranking, breakdown catégories, honnêteté hub vide + `total=null` sur set vide + dernier snapshot sur échec), `test_decision_evidence` (assemblage `source_evidence` réel par groupe market/risk/social), `test_daily_report` (rapport conseil quotidien : ratios bornés/directionnels, bandes de rating, signaux BUY/HOLD/SELL/AVOID aux seuils, robustesse données manquantes, prudence des prédictions ∈[0.15,0.85], assemblage JSON + Markdown, univers simulé 300 + perf, round-trip store, scheduler). **237 tests** au total. CI : `.github/workflows/ci.yml` (`pytest -q`) en plus de `docs-check`.
 
 ## Gestion automatique des terminaux par Claude
 
@@ -338,6 +358,7 @@ Liste **réelle**, vérifiée par rapport au disque (`scripts/dev_supervisor.bui
 | `social_ingestor` | `python -m workers.social_ingestor` | long-running | non | oui |
 | `antigravity_bot` | `python -m workers.antigravity_bot` | long-running | non | oui |
 | `outcome_evaluator` | `python -m workers.outcome_evaluator` | long-running | non | oui |
+| `report_worker` | `python -m workers.report_worker` | long-running | non | oui |
 | `api` | `python -m uvicorn api.main:app --host 127.0.0.1 --port 8000` | long-running | non | oui |
 
 Notes de vérité (ne pas s'en écarter) :

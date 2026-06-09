@@ -544,6 +544,7 @@ async function switchSymbol(symbol) {
         el.classList.toggle('active', el.dataset.symbol === symbol);
     });
     updateSelectedStats(symbol);
+    updateRiskGates(symbol);
     await loadChart(symbol, currentRange, /*switching*/ true);
     // Guard the post-await race: if the user switched again during loadChart, don't
     // bind the live price/microstructure feed to this now-stale symbol.
@@ -949,12 +950,40 @@ function renderLiveDebug(snap) {
     }).join('');
 }
 
-// ── Activity Feed (bounded ring buffer) ─────
-async function updateActivity() {
+// ── Activity Feed — tabs (Trades / Decisions / Errors / Incidents) ───────────
+// Each tab renders into #activity-container from a REAL source; nothing is
+// fabricated — an empty/unavailable source shows an honest message.
+let activeFeedTab = 'trades';
+function setFeedSource(txt) { const el = document.getElementById('feed-source'); if (el) el.textContent = txt || ''; }
+function feedEmpty(msg) {
+    const c = document.getElementById('activity-container');
+    if (c) c.innerHTML = `<div class="feed-empty">${escapeHtml(msg)}</div>`;
+}
+function setupFeedTabs() {
+    const tabs = document.getElementById('feed-tabs');
+    if (!tabs) return;
+    tabs.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+        activeFeedTab = b.dataset.feed || 'trades';
+        tabs.querySelectorAll('button').forEach(x => x.classList.toggle('active', x === b));
+        refreshActivity();
+    }));
+}
+function refreshActivity() {
+    switch (activeFeedTab) {
+        case 'decisions': return loadDecisionsFeed();
+        case 'errors': return loadErrorsFeed();
+        case 'incidents': return loadIncidentsFeed();
+        default: return loadTradesFeed();
+    }
+}
+
+async function loadTradesFeed() {
+    setFeedSource('paper_trade · DB');
     try {
         const res = await fetch(`${API_URL}/trades/recent?limit=${LIMITS.maxEvents}`);
         const data = await res.json();
-        if (!data || data.error) return;
+        if (!data || data.error) { feedEmpty('Trades unavailable.'); return; }
+        if (activeFeedTab !== 'trades') return;
         const container = document.getElementById('activity-container');
         container.innerHTML = '';
         data.slice(0, LIMITS.maxEvents).forEach(trade => {
@@ -965,13 +994,94 @@ async function updateActivity() {
             const actionClass = trade.side === 'buy' ? 'buy' : 'sell';
             div.innerHTML = `
                 <span class="feed-time">${time}</span>
-                <span class="feed-action ${actionClass}">${trade.side}</span>
-                <span class="feed-detail">${trade.symbol} — ${Number(trade.qty).toFixed(6)} @ $${Number(trade.price).toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
-                <span class="feed-score">slip: ${Number(trade.slippage_bps).toFixed(1)}bps | ${trade.reason || ''}</span>`;
+                <span class="feed-action ${actionClass}">${escapeHtml(trade.side)}</span>
+                <span class="feed-detail">${escapeHtml(trade.symbol)} — ${Number(trade.qty).toFixed(6)} @ $${Number(trade.price).toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
+                <span class="feed-score">slip: ${Number(trade.slippage_bps).toFixed(1)}bps | ${escapeHtml(trade.reason || '')}</span>`;
             container.appendChild(div);
         });
-        if (!data.length) container.innerHTML = '<div class="feed-item"><span class="feed-detail" style="color:var(--text-muted)">No trades yet — bot is evaluating market conditions…</span></div>';
-    } catch (e) { /* silent */ }
+        if (!data.length) feedEmpty('No trades yet — bot is evaluating market conditions…');
+    } catch (e) { feedEmpty('Trades unavailable.'); }
+}
+
+async function loadDecisionsFeed() {
+    setFeedSource('decision_snapshot · core symbols');
+    try {
+        const res = await fetch(`${API_URL}/signals`);
+        const data = await res.json();
+        if (!Array.isArray(data)) { feedEmpty('Decisions unavailable.'); return; }
+        if (activeFeedTab !== 'decisions') return;
+        if (!data.length) { feedEmpty('No decisions recorded yet.'); return; }
+        const container = document.getElementById('activity-container');
+        container.innerHTML = '';
+        data.forEach(d => {
+            const action = d.action_proposed || 'hold';
+            const div = document.createElement('div');
+            div.className = 'feed-item';
+            div.addEventListener('click', () => openSignalDetail(d.symbol));
+            const time = d.ts_eval ? new Date(d.ts_eval).toLocaleTimeString() : '';
+            div.innerHTML = `
+                <span class="feed-time">${time}</span>
+                <span class="feed-action ${action}">${escapeHtml(action)}</span>
+                <span class="feed-detail">${escapeHtml(d.symbol)} — <span style="color:var(--text-muted)">${escapeHtml(explainReason(d.reason_code, d.s_total))}</span></span>
+                <span class="feed-score">Σ ${d.s_total >= 0 ? '+' : ''}${Number(d.s_total).toFixed(2)} · ${escapeHtml(d.quality_grade || 'n/a')}</span>`;
+            container.appendChild(div);
+        });
+    } catch (e) { feedEmpty('Decisions unavailable.'); }
+}
+
+async function loadErrorsFeed() {
+    setFeedSource('system_log · WARN/ERROR');
+    try {
+        const res = await fetch(`${API_URL}/system/logs?limit=120`);
+        const logs = await res.json();
+        if (!Array.isArray(logs)) { feedEmpty('Logs unavailable.'); return; }
+        if (activeFeedTab !== 'errors') return;
+        const errs = logs.filter(l => ['ERROR', 'WARN', 'WARNING', 'CRITICAL'].includes((l.level || '').toUpperCase()));
+        if (!errs.length) { feedEmpty('No errors or warnings recorded. ✓'); return; }
+        const container = document.getElementById('activity-container');
+        container.innerHTML = '';
+        errs.forEach(l => {
+            const lvl = (l.level || 'LOG').toUpperCase();
+            const isErr = lvl === 'ERROR' || lvl === 'CRITICAL';
+            const div = document.createElement('div');
+            div.className = 'feed-item ' + (isErr ? 'sev-critical' : 'sev-warning');
+            const time = l.ts_event ? new Date(l.ts_event).toLocaleTimeString() : '';
+            div.innerHTML = `
+                <span class="feed-time">${time}</span>
+                <span class="feed-action ${isErr ? 'error' : 'warn'}">${escapeHtml(lvl)}</span>
+                <span class="feed-detail">[${escapeHtml(l.component || '?')}] ${escapeHtml(l.message || '')}</span>`;
+            container.appendChild(div);
+        });
+    } catch (e) { feedEmpty('Logs unavailable.'); }
+}
+
+async function loadIncidentsFeed() {
+    setFeedSource(`ops incidents · ${OPS_BASE}`);
+    let data = null;
+    try {
+        const res = await fetch(`${OPS_BASE}/api/ops/incidents?limit=50`);
+        data = await res.json();
+    } catch (e) {
+        feedEmpty(`Ops API unavailable (${OPS_BASE}). Start the supervisor to see incidents.`);
+        return;
+    }
+    if (activeFeedTab !== 'incidents') return;
+    if (!Array.isArray(data) || !data.length) { feedEmpty('No incidents recorded. ✓'); return; }
+    const container = document.getElementById('activity-container');
+    container.innerHTML = '';
+    data.slice().reverse().forEach(inc => {
+        const sev = (inc.severity || 'warning').toLowerCase();
+        const isCrit = sev === 'critical' || sev === 'error';
+        const div = document.createElement('div');
+        div.className = 'feed-item ' + (isCrit ? 'sev-critical' : 'sev-warning');
+        const time = inc.last_seen_at ? new Date(inc.last_seen_at * 1000).toLocaleTimeString() : '';
+        const detail = inc.suspected_root_cause || inc.recommended_action || '';
+        div.innerHTML = `
+            <span class="feed-time">${time}</span>
+            <span class="feed-action ${isCrit ? 'error' : 'warn'}">${escapeHtml(sev)}</span>
+            <span class="feed-detail"><b>${escapeHtml(inc.process || '?')}</b>${inc.error_type ? ' · ' + escapeHtml(inc.error_type) : ''} — ${escapeHtml(detail)}</span>`;
+        container.appendChild(div);
+    });
 }
 
 // ── Drilldown Modal ─────────────────────────
@@ -1395,18 +1505,175 @@ function setupFrontendErrorReporter() {
     window.addEventListener('unhandledrejection', (e) => { const r = e.reason || {}; reportFrontendError('unhandledrejection: ' + (r.message || String(r)), r.stack); });
 }
 
-// ── Right decision-intelligence panel drawer (narrow screens) ───────────────
-// On wide screens the panel lives in the grid; below 1100px it becomes an
-// off-canvas drawer toggled from the header (CSS owns the media query).
-function setupRightDrawer() {
-    const toggle = document.getElementById('toggle-right');
-    const closeBtn = document.getElementById('close-right');
+// ── Side-panel drawers (narrow screens) ─────────────────────────────────────
+// Wide screens keep both side panels in the grid. Below 1100px the right
+// "Decision Intelligence" panel is an off-canvas drawer; below 880px the left
+// "Market Explorer" is too. CSS owns the media queries; JS just toggles the
+// body classes and shares one backdrop.
+function setupDrawers() {
+    const closeAll = () => document.body.classList.remove('right-open', 'left-open');
+    const tR = document.getElementById('toggle-right');
+    const cR = document.getElementById('close-right');
+    const tL = document.getElementById('toggle-left');
     const backdrop = document.getElementById('drawer-backdrop');
-    const close = () => document.body.classList.remove('right-open');
-    if (toggle) toggle.addEventListener('click', () => document.body.classList.toggle('right-open'));
-    if (closeBtn) closeBtn.addEventListener('click', close);
-    if (backdrop) backdrop.addEventListener('click', close);
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+    if (tR) tR.addEventListener('click', () => { document.body.classList.remove('left-open'); document.body.classList.toggle('right-open'); });
+    if (cR) cR.addEventListener('click', () => document.body.classList.remove('right-open'));
+    if (tL) tL.addEventListener('click', () => { document.body.classList.remove('right-open'); document.body.classList.toggle('left-open'); });
+    if (backdrop) backdrop.addEventListener('click', closeAll);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeAll(); });
+}
+
+// ── Theme (dark default · light opt-in, persisted) ──────────────────────────
+const THEME_KEY = 'ag_theme';
+function loadTheme() { try { return localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark'; } catch (e) { return 'dark'; } }
+function applyChartTheme(light) {
+    if (!chart) return;
+    const text = light ? '#46546B' : '#8C97A8';
+    const grid = light ? 'rgba(15,23,42,0.07)' : 'rgba(255,255,255,0.04)';
+    const border = light ? 'rgba(15,23,42,0.12)' : 'rgba(255,255,255,0.1)';
+    try {
+        chart.applyOptions({
+            layout: { textColor: text },
+            grid: { vertLines: { color: grid }, horzLines: { color: grid } },
+            rightPriceScale: { borderColor: border },
+            timeScale: { borderColor: border },
+        });
+    } catch (e) { /* chart not ready */ }
+}
+function applyTheme(theme) {
+    const light = theme === 'light';
+    document.documentElement.setAttribute('data-theme', light ? 'light' : 'dark');
+    const btn = document.getElementById('theme-toggle');
+    if (btn) { btn.textContent = light ? '☀️' : '🌙'; btn.setAttribute('aria-pressed', String(light)); }
+    const meta = document.querySelector('meta[name="color-scheme"]');
+    if (meta) meta.setAttribute('content', light ? 'light' : 'dark');
+    applyChartTheme(light);
+    try { localStorage.setItem(THEME_KEY, light ? 'light' : 'dark'); } catch (e) {}
+}
+function setupTheme() {
+    const btn = document.getElementById('theme-toggle');
+    if (btn) btn.addEventListener('click', () =>
+        applyTheme(document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light'));
+}
+// Set the attribute as early as possible (script runs at end of <body>) to limit FOUC.
+document.documentElement.setAttribute('data-theme', loadTheme());
+
+// ── Risk Gates (selected symbol's latest decision) ──────────────────────────
+// Real data only: the forcing gate comes from the persisted reason_code, the
+// breakdown from decision_factor rows (category=risk). A symbol with no bot
+// decision (non-core) shows an honest "no decision" state — never a fake matrix.
+const RISK_GATE_LABELS = {
+    data_stale: 'Market data is stale (older than the freshness limit).',
+    data_unavailable: 'No recent market data available for this symbol.',
+    spread_too_wide: 'Bid/ask spread exceeds the max allowed.',
+    depth_too_thin: 'Order-book depth is below the liquidity floor.',
+    slippage_too_high: 'Estimated slippage is above the max allowed.',
+    position_too_concentrated: 'Position weight exceeds the per-symbol cap.',
+    btc_corr_too_high: 'Correlation with BTC is too high.',
+    drawdown_too_deep: 'Portfolio drawdown is beyond the max allowed.',
+};
+function gateKey(name) { return String(name || '').trim().split(/[\s(]/)[0]; }
+function prettyFactor(name) { return String(name || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()); }
+
+async function updateRiskGates(symbol) {
+    const el = document.getElementById('risk-gates');
+    if (!el) return;
+    if (!symbol) { el.innerHTML = '<div class="rg-empty">Select a symbol to see its risk gates.</div>'; return; }
+    let hist = null;
+    try { const r = await fetch(`${API_URL}/signals/${encodeURIComponent(symbol)}?limit=1`); hist = await r.json(); }
+    catch (e) { el.innerHTML = '<div class="rg-empty">Risk gates unavailable (network).</div>'; return; }
+    if (symbol !== currentSymbol) return;                       // user switched mid-fetch
+    if (!Array.isArray(hist) || !hist.length) {
+        el.innerHTML = `<div class="rg-empty">No bot decision for ${escapeHtml(symbol)} — risk gates run only for the core traded symbols.</div>`;
+        return;
+    }
+    const latest = hist[0];
+    let decision = null;
+    try { const r2 = await fetch(`${API_URL}/decision/${latest.id}`); decision = await r2.json(); } catch (e) { /* factors optional */ }
+    if (symbol !== currentSymbol) return;
+    renderRiskGates(el, latest, decision);
+}
+function renderRiskGates(el, latest, decision) {
+    const reason = latest.reason_code || '';
+    const forced = reason.indexOf('risk_gate:') === 0;
+    const gateRaw = forced ? reason.slice('risk_gate:'.length) : null;
+    const sRisk = (typeof latest.s_risk === 'number') ? latest.s_risk : null;
+    let statusCls = 'neutral', statusTxt = 'no blocking gate';
+    if (forced) { statusCls = 'blocked'; statusTxt = 'forced HOLD'; }
+    else if (sRisk != null) { statusCls = 'tradeable'; statusTxt = 'tradeable'; }
+
+    let html = `<div class="rg-head">
+        <span class="rg-status ${statusCls}" title="Derived from the latest decision's reason_code">${statusTxt}</span>
+        <span class="rg-rsk">RSK <b>${sRisk != null ? (sRisk >= 0 ? '+' : '') + sRisk.toFixed(2) : 'n/a'}</b></span>
+    </div>`;
+    if (forced) {
+        const desc = RISK_GATE_LABELS[gateKey(gateRaw)] || '';
+        html += `<div class="rg-gate-block">⛔ Blocked by gate: <b>${escapeHtml(gateRaw)}</b>${desc ? '<br>' + escapeHtml(desc) : ''}</div>`;
+    }
+    const factors = (decision && Array.isArray(decision.factors)) ? decision.factors.filter(f => f.category === 'risk') : [];
+    if (factors.length) {
+        factors.forEach(f => {
+            // Risk sub-scores are [0,1] where HIGHER = safer (risk_engine._score_inverse).
+            const c = Number(f.contribution);
+            const cls = c >= 0.66 ? 'good' : c >= 0.4 ? 'warn' : 'bad';
+            html += `<div class="rg-factor">
+                <div class="rg-factor-head"><span class="rg-factor-name">${escapeHtml(prettyFactor(f.name))}</span><span class="rg-factor-val ${cls}">${Number.isFinite(c) ? c.toFixed(2) : 'n/a'}</span></div>
+                <div class="rg-factor-exp">${escapeHtml(f.explanation || '')}</div>
+            </div>`;
+        });
+    } else if (!forced) {
+        html += '<div class="rg-empty">No risk factors recorded for the latest decision.</div>';
+    }
+    el.innerHTML = html;
+}
+
+// ── Source Quality (which data stream is real / mock / unavailable) ──────────
+function sqStatus(block, opts) {
+    if (opts.disabled) return ['off', 'disabled'];
+    if (opts.mock) return ['mock', 'mock'];
+    if (opts.notConfigured) return ['off', 'not configured'];
+    if (block && block.real) {
+        if (opts.age != null && opts.staleMs && opts.age > opts.staleMs) return ['stale', 'stale'];
+        return ['live', 'live'];
+    }
+    return ['unavail', 'unavailable'];
+}
+function sqRow(label, block, opts = {}) {
+    block = block || {};
+    const [cls, txt] = sqStatus(block, opts);
+    const parts = [];
+    if (opts.source) parts.push(opts.source);
+    else if (block.source) parts.push(block.source);
+    if (opts.age != null) parts.push('age ' + fmtAgeMs(opts.age));
+    const meta = parts.join(' · ');
+    return `<div class="sq-row">
+        <span class="sq-label">${escapeHtml(label)}</span>
+        <span class="sq-dot ${cls}">${escapeHtml(txt)}</span>
+        ${meta ? `<span class="sq-meta">${escapeHtml(meta)}</span>` : ''}
+    </div>`;
+}
+async function updateSourceQuality() {
+    const el = document.getElementById('source-quality');
+    if (!el) return;
+    let s = null;
+    try { const r = await fetch(`${API_URL}/market/source`); s = await r.json(); }
+    catch (e) { el.innerHTML = '<div class="sq-empty">Source map unavailable (network).</div>'; return; }
+    if (!s || s.error) { el.innerHTML = '<div class="sq-empty">Source map unavailable.</div>'; return; }
+    const now = Date.now();
+    const priceAge = (lastLiveSnap && lastLiveSnap.symbol === currentSymbol && lastLiveSnap.data_age_ms != null) ? lastLiveSnap.data_age_ms : null;
+    const chartAge = chartStore.lastAppliedAt ? (now - chartStore.lastAppliedAt) : null;
+    const uniAge = universe.lastRefreshMs ? (now - universe.lastRefreshMs) : null;
+    const priceStale = ((liveConfig.max_age_ms || 3000) + 4000);
+    const chartStale = ((liveConfig.chart_live_max_age_ms || 6000) + 2000);
+    const rows = [
+        sqRow('Price', s.price, { source: s.price && s.price.price_source, age: priceAge, staleMs: priceStale }),
+        sqRow('Chart', s.chart, { source: s.chart && s.chart.interval ? ('kline ' + s.chart.interval) : null, age: chartAge, staleMs: chartStale }),
+        sqRow('Universe', s.universe, { source: s.universe && s.universe.count ? (s.universe.count + ' pairs') : null, age: uniAge }),
+        sqRow('Social', s.social, { mock: s.social && s.social.source === 'mock', notConfigured: !(s.social && s.social.source === 'mock') }),
+        sqRow('Macro', s.global, { disabled: s.global && s.global.enabled === false }),
+        sqRow('DeFi', s.defi_protocols, { disabled: s.defi_protocols && s.defi_protocols.enabled === false, source: s.defi_protocols && s.defi_protocols.count ? (s.defi_protocols.count + ' protocols') : null }),
+    ];
+    el.innerHTML = rows.join('');
 }
 
 // ── Live source debug modal wiring ─────────
@@ -1575,17 +1842,247 @@ async function fetchDefi() {
     }).join('');
 }
 
+// ── Daily Crypto Intelligence Report (advisory tier — real data only) ─────────
+// Beginner-readable advisory over the ~300-crypto universe. Predictions are shown
+// as probabilities/scenarios (never certainties); unavailable inputs render N/A.
+const reportState = {
+    report: null, filterSig: 'ALL', filterRating: 'ALL',
+    sort: 'opportunity_score', search: '', selected: null,
+};
+
+function sigClass(sig) {
+    return ({ BUY: 'sig-buy', SELL: 'sig-sell', HOLD: 'sig-hold', AVOID: 'sig-avoid' })[sig] || 'sig-hold';
+}
+function ratingClass(r) {
+    return 'rating-badge ' + ({ 'A+': 'r-aplus', 'A': 'r-a', 'B': 'r-b', 'C': 'r-c', 'D': 'r-d', 'E': 'r-e' })[r] || 'rating-badge';
+}
+const REGIME_FR = { bullish: 'Haussier', neutral: 'Neutre', bearish: 'Baissier' };
+
+function setupDailyReport() {
+    const modal = document.getElementById('report-modal');
+    const btn = document.getElementById('report-btn');
+    const close = document.getElementById('close-report');
+    if (!modal || !btn) return;
+    btn.addEventListener('click', () => { modal.classList.remove('hidden'); fetchDailyReport(); });
+    if (close) close.addEventListener('click', () => modal.classList.add('hidden'));
+    modal.addEventListener('click', (e) => { if (e.target === modal) modal.classList.add('hidden'); });
+
+    const gen = document.getElementById('report-generate');
+    if (gen) gen.addEventListener('click', generateDailyReport);
+
+    const search = document.getElementById('report-search');
+    if (search) search.addEventListener('input', debounce((e) => {
+        reportState.search = (e.target.value || '').trim().toUpperCase(); renderReportTable();
+    }, 200));
+
+    const sigFilters = document.getElementById('report-signal-filters');
+    if (sigFilters) sigFilters.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+        sigFilters.querySelectorAll('button').forEach(x => x.classList.remove('active'));
+        b.classList.add('active'); reportState.filterSig = b.dataset.sig; renderReportTable();
+    }));
+    const ratingSel = document.getElementById('report-rating-filter');
+    if (ratingSel) ratingSel.addEventListener('change', (e) => { reportState.filterRating = e.target.value; renderReportTable(); });
+    const sortSel = document.getElementById('report-sort');
+    if (sortSel) sortSel.addEventListener('change', (e) => { reportState.sort = e.target.value; renderReportTable(); });
+}
+
+async function generateDailyReport() {
+    const status = document.getElementById('report-status');
+    if (status) { status.textContent = 'génération…'; status.className = 'status-badge disconnected'; }
+    try {
+        const res = await fetch(`${API_URL}/reports/daily/generate`, { method: 'POST' });
+        const out = await res.json();
+        if (!out.ok) throw new Error(out.error || 'échec');
+    } catch (e) { /* fall through to fetch which shows honest state */ }
+    await fetchDailyReport();
+}
+
+async function fetchDailyReport() {
+    const status = document.getElementById('report-status');
+    let rep = null;
+    try {
+        const res = await fetch(`${API_URL}/reports/daily/latest`);
+        rep = await res.json();
+    } catch (e) {
+        if (status) { status.textContent = 'indisponible'; status.className = 'status-badge disconnected'; }
+        return;
+    }
+    if (!rep || rep.available === false) {
+        reportState.report = null;
+        if (status) { status.textContent = rep && rep.enabled === false ? 'désactivé' : 'aucun rapport'; status.className = 'status-badge disconnected'; }
+        const kpis = document.getElementById('report-kpis');
+        if (kpis) kpis.innerHTML = `<div class="report-empty">Aucun rapport généré pour le moment. Cliquez « Générer » pour en créer un.</div>`;
+        ['report-ratings', 'report-top-buy', 'report-top-sell', 'report-top-watch', 'report-rows', 'report-summary'].forEach(id => { const el = document.getElementById(id); if (el) el.innerHTML = ''; });
+        return;
+    }
+    reportState.report = rep;
+    renderReport(rep);
+}
+
+function renderReport(rep) {
+    const status = document.getElementById('report-status');
+    if (status) {
+        const regime = REGIME_FR[rep.market_regime] || rep.market_regime || '—';
+        status.textContent = `${rep.report_date || ''} · ${regime}`;
+        status.className = `status-badge ${rep.status === 'error' ? 'disconnected' : 'connected'}`;
+    }
+    const mc = rep.market_context || {};
+    const c = rep.signal_counts || {};
+    const kpis = document.getElementById('report-kpis');
+    if (kpis) {
+        kpis.innerHTML = [
+            kpiCard('Régime', REGIME_FR[rep.market_regime] || '—'),
+            kpiCard('Univers', `${rep.universe_size || 0} cryptos`),
+            kpiCard('BUY', c.BUY || 0, 'sig-buy'),
+            kpiCard('HOLD', c.HOLD || 0, 'sig-hold'),
+            kpiCard('SELL', c.SELL || 0, 'sig-sell'),
+            kpiCard('AVOID', c.AVOID || 0, 'sig-avoid'),
+            kpiCard('Largeur', mc.breadth_pct != null ? Math.round(mc.breadth_pct * 100) + '%' : 'n/a'),
+            kpiCard('Fear&Greed', mc.fear_greed != null ? Math.round(mc.fear_greed) : 'n/a'),
+        ].join('');
+    }
+    const summary = document.getElementById('report-summary');
+    if (summary) summary.textContent = rep.summary || '';
+
+    // Rating distribution
+    const ratings = document.getElementById('report-ratings');
+    if (ratings) {
+        const dist = rep.rating_distribution || {};
+        ratings.innerHTML = (rep.rating_scale || []).map(s =>
+            `<span class="report-rating-chip ${ratingClass(s.rating).replace('rating-badge ', '')}" title="${escapeHtml(s.definition)}">
+                <b>${escapeHtml(s.rating)}</b> ${dist[s.rating] || 0}</span>`).join('');
+    }
+
+    renderTopList('report-top-buy', rep.top_buy);
+    renderTopList('report-top-sell', rep.top_sell);
+    renderTopList('report-top-watch', rep.top_watchlist);
+    renderReportTable();
+}
+
+function kpiCard(label, value, cls) {
+    return `<div class="report-kpi"><span class="rk-label">${escapeHtml(label)}</span>
+        <span class="rk-value ${cls || ''}">${escapeHtml(String(value))}</span></div>`;
+}
+
+function renderTopList(id, rows) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    rows = Array.isArray(rows) ? rows : [];
+    if (!rows.length) { el.innerHTML = `<div class="report-empty-sm">—</div>`; return; }
+    el.innerHTML = rows.map(r =>
+        `<div class="report-top-item" data-sym="${escapeHtml(r.symbol)}">
+            <span class="rt-sym">${escapeHtml(r.symbol)}</span>
+            <span class="rating-badge ${ratingClass(r.rating).replace('rating-badge ', '')}">${escapeHtml(r.rating || '')}</span>
+            <span class="rt-chg ${chgClass(r.change_24h)}">${fmtPct(r.change_24h)}</span>
+        </div>`).join('');
+    el.querySelectorAll('.report-top-item').forEach(it => it.addEventListener('click', () => showAssetDetail(it.dataset.sym)));
+}
+
+function renderReportTable() {
+    const rep = reportState.report;
+    const body = document.getElementById('report-rows');
+    const countEl = document.getElementById('report-count');
+    if (!rep || !body) return;
+    let rows = (rep.assets || []).slice();
+
+    if (reportState.filterSig !== 'ALL') rows = rows.filter(a => a.signal === reportState.filterSig);
+    if (reportState.filterRating !== 'ALL') rows = rows.filter(a => a.rating === reportState.filterRating);
+    if (reportState.search) rows = rows.filter(a => (a.symbol || '').toUpperCase().includes(reportState.search) || (a.base || '').toUpperCase().includes(reportState.search));
+
+    const key = reportState.sort;
+    const asc = (key === 'rank');
+    rows.sort((a, b) => {
+        const va = a[key] == null ? -Infinity : a[key];
+        const vb = b[key] == null ? -Infinity : b[key];
+        return asc ? va - vb : vb - va;
+    });
+
+    if (countEl) countEl.textContent = `${rows.length} / ${(rep.assets || []).length}`;
+    // 300 rows render once into an on-demand modal (fine); guard with a hard cap.
+    body.innerHTML = rows.slice(0, 300).map(a => `
+        <tr data-sym="${escapeHtml(a.symbol)}" class="${reportState.selected === a.symbol ? 'sel' : ''}">
+            <td>${a.rank}</td>
+            <td class="rr-sym">${escapeHtml(a.symbol)}</td>
+            <td>${fmtPrice(a.price)}</td>
+            <td class="${chgClass(a.change_24h)}">${fmtPct(a.change_24h)}</td>
+            <td>${fmtUsdCompact(a.quote_volume_24h) ?? 'n/a'}</td>
+            <td><span class="sig-badge ${sigClass(a.signal)}">${a.signal}</span></td>
+            <td><span class="rating-badge ${ratingClass(a.rating).replace('rating-badge ', '')}">${escapeHtml(a.rating)}</span></td>
+            <td>${Math.round(a.opportunity_score)}</td>
+            <td>${Math.round(a.risk_score)}</td>
+            <td>${Math.round(a.confidence_score)}</td>
+            <td class="rr-hor">${escapeHtml(a.horizon || '')}</td>
+        </tr>`).join('');
+    body.querySelectorAll('tr').forEach(tr => tr.addEventListener('click', () => showAssetDetail(tr.dataset.sym)));
+}
+
+function showAssetDetail(symbol) {
+    const rep = reportState.report;
+    if (!rep) return;
+    const a = (rep.assets || []).find(x => x.symbol === symbol);
+    const panel = document.getElementById('report-detail');
+    if (!a || !panel) return;
+    reportState.selected = symbol;
+    const p = a.prediction || {};
+    const m = a.metrics || {};
+    const ratioRow = (label, v) => `<div class="rd-ratio"><span>${escapeHtml(label)}</span><b>${v == null ? 'N/A' : (typeof v === 'number' ? v.toFixed(2) : v)}</b></div>`;
+    panel.innerHTML = `
+        <div class="rd-head">
+            <div><span class="rd-sym">${escapeHtml(a.symbol)}</span>
+                <span class="sig-badge ${sigClass(a.signal)}">${a.signal}</span>
+                <span class="rating-badge ${ratingClass(a.rating).replace('rating-badge ', '')}">${escapeHtml(a.rating)}</span>
+                <span class="rd-hor">${escapeHtml(a.horizon || '')}</span>
+            </div>
+            <button class="close-btn" id="rd-close" aria-label="Close detail">&times;</button>
+        </div>
+        <div class="rd-scores">
+            <span>Opportunité <b>${Math.round(a.opportunity_score)}</b>/100</span>
+            <span>Risque <b>${Math.round(a.risk_score)}</b>/100</span>
+            <span>Confiance <b>${Math.round(a.confidence_score)}</b>/100</span>
+        </div>
+        <p class="rd-explain">${escapeHtml(a.explanation_simple || '')}</p>
+        <div class="rd-pred">
+            <div class="rd-prob">
+                <span class="up">Hausse ${Math.round((p.up_probability || 0) * 100)}%</span>
+                <span class="down">Baisse ${Math.round((p.down_probability || 0) * 100)}%</span>
+                <span class="rd-conf">confiance : ${escapeHtml(p.confidence_level || '?')}</span>
+            </div>
+            <p class="rd-scn">${escapeHtml(p.scenario || '')}</p>
+            <p class="rd-scn rd-bull">▲ ${escapeHtml(p.bullish_case || '')}</p>
+            <p class="rd-scn rd-bear">▼ ${escapeHtml(p.bearish_case || '')}</p>
+            <p class="rd-scn rd-inval">⚠ ${escapeHtml(p.invalidation || '')}</p>
+        </div>
+        <div class="rd-ratios">
+            ${ratioRow('Momentum', m.momentum_ratio)}
+            ${ratioRow('Volume confirm.', m.volume_confirmation_ratio)}
+            ${ratioRow('Liquidité', m.liquidity_ratio)}
+            ${ratioRow('Force vs BTC', m.relative_strength_btc)}
+            ${ratioRow('Qualité tendance', m.trend_quality_ratio)}
+            ${ratioRow('Volatilité', m.volatility_ratio)}
+        </div>
+        <div class="rd-justif">${escapeHtml(a.justification || '')}</div>`;
+    panel.classList.remove('hidden');
+    const cl = document.getElementById('rd-close');
+    if (cl) cl.addEventListener('click', () => { panel.classList.add('hidden'); reportState.selected = null; renderReportTable(); });
+    renderReportTable();
+    panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
     setupLogging();
     setupOps();
     setupDefi();
+    setupDailyReport();
     startFeedWatchdog();
     startChartWatchdog();
     initChart();
     setupWatchlistControls();
     setupRangeControls();
     setupFavCurrent();
-    setupRightDrawer();
+    setupDrawers();
+    setupTheme();
+    setupFeedTabs();
+    applyTheme(loadTheme());          // sync button + chart to the persisted theme
 
     await loadLiveConfig();          // ranges, limits, sources (needed first)
     // Core overlay and the 300-row universe are independent — fetch them IN PARALLEL
@@ -1600,16 +2097,19 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     updatePortfolio();
     updateSignals();
-    updateActivity();
+    refreshActivity();
     fetchGlobalContext();
+    updateSourceQuality();
 
     // Periodic refreshes (throttled / bounded to keep memory + CPU low).
     setInterval(updatePortfolio, 5000);
     setInterval(updateCoreWatchlist, 10000);
     setInterval(fetchUniverse, Math.max(2000, LIMITS.snapshotMs));
     setInterval(updateSignals, 10000);
-    setInterval(updateActivity, 8000);
+    setInterval(() => { if (currentSymbol) updateRiskGates(currentSymbol); }, 12000);
+    setInterval(refreshActivity, 8000);
     setInterval(() => updateMicrostructure(), 5000);
     // Macro context updates slowly (server polls ~every 60s); 30s client poll is ample.
     setInterval(fetchGlobalContext, 30000);
+    setInterval(updateSourceQuality, 15000);
 });

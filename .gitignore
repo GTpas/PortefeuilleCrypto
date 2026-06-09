@@ -10,5 +10,11 @@ __pycache__/
 .DS_Store
 # Supervisor runtime artifacts (incidents, captured logs)
 logs/
+# Generated daily-report artifacts ONLY — the reports/ Python package source
+# (reports/*.py) stays tracked; only the runtime JSON/Markdown/index outputs are ignored.
+reports/daily_crypto_report_*.json
+reports/daily_crypto_report_*.md
+reports/_index.json
+reports/*.tmp
 # Personal Claude Code overrides (permissions, etc.) — never shared
 .claude/settings.local.json

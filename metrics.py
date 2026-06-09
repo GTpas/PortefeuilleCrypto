@@ -143,6 +143,27 @@ defi_tracked_tvl_usd = Gauge(
     "defi_tracked_tvl_usd", "Sum of TVL across the tracked DeFi protocols (USD, DefiLlama)"
 )
 
+# ── Daily Crypto Intelligence Report (advisory tier) ──────────
+daily_report_runs_total = Counter(
+    "daily_report_runs_total", "Daily-report generations attempted", ["trigger"]
+)
+daily_report_errors_total = Counter(
+    "daily_report_errors_total", "Daily-report generations that failed"
+)
+daily_report_build_latency_ms = Histogram(
+    "daily_report_build_latency_ms", "Time to build one daily report (ms)",
+    buckets=(25, 50, 100, 250, 500, 1000, 2500, 5000, 10000),
+)
+daily_report_assets = Gauge(
+    "daily_report_assets", "Number of assets in the latest generated daily report"
+)
+daily_report_last_success_ts = Gauge(
+    "daily_report_last_success_ts", "Unix ts of the last successful daily-report generation"
+)
+daily_report_signal_counts = Gauge(
+    "daily_report_signal_counts", "Asset count per final signal in the latest report", ["signal"]
+)
+
 # ── Aggregator (trade_tick → ohlcv_1s) ──────────
 aggregator_cycles_total = Counter(
     "aggregator_cycles_total", "Aggregation cycles run (loop iterations)"

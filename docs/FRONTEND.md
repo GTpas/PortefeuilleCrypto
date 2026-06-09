@@ -18,7 +18,7 @@ Cockpit temps réel servi **directement par l'API** sur `http://localhost:8000/`
 - **Layout robuste** : `.app-container` = grid `auto / minmax(0,1fr) / var(--activity-h)` en `100dvh`, `overflow:hidden`. Wrapper **`.top-stack`** = header + KPI portfolio + macro (jamais coupés). `.cockpit-grid` = 3 colonnes `minmax()`. Chaque panneau scrollable : parent `overflow:hidden` + `min-height:0`, scroll uniquement sur `.scroll-panel`.
 
 ## Zones (5)
-1. **Top App Bar** (`.app-bar`) : logo + cluster statut (Universe / Ops / Live-Stale-Offline, **texte** pas couleur seule) + cluster tools (🔬 Source, 🏦 DeFi, 📋 Logs, 🖥 Ops) + `#toggle-right` (drawer).
+1. **Top App Bar** (`.app-bar`) : logo + cluster statut (Universe / Ops / Live-Stale-Offline, **texte** pas couleur seule) + cluster tools (🔬 Source, 🏦 DeFi, 📅 Report, 📋 Logs, 🖥 Ops) + `#toggle-right` (drawer).
 - **Barre portefeuille** (cartes KPI) : Total Value, Cash, P&L, Exposure, Positions, Drawdown, statut bot.
 - **Barre macro** (`#macro-bar`) : contexte marché global **données réelles uniquement** — Total Mkt Cap, 24h Volume, Dominance BTC/ETH, var. mcap 24h (CoinGecko), DeFi TVL (DefiLlama), Fear & Greed (alternative.me) + sources live. Cellule indisponible = `n/a` (jamais fabriquée), valeur périmée = atténuée. Masquée si `global_context_enabled=false`.
 - **Watchlist** : filtres `trending / volume / gainers / losers / core / favorites` + recherche (debounced).
@@ -27,7 +27,7 @@ Cockpit temps réel servi **directement par l'API** sur `http://localhost:8000/`
 - **Signals & sentiment** : cartes SOC / MKT / RSK / Σ par symbole.
 - **Microstructure** : spread, depth, imbalance, trade pressure, relative volume, slippage.
 - **Activity feed** : décisions horodatées (ring buffer).
-- **Modales** : Logs, Drill-down (waterfall des facteurs + **Source Evidence** structurée), Timeline, **🖥 Ops / Terminals**, **🏦 DeFi** (top protocoles par TVL — DefiLlama, table rang/nom/catégorie/chaînes/TVL/24h/7j + breakdown par catégorie, **données réelles uniquement** : `n/a`/vide honnête si hub off), **🔬 Live Source Debug**, Docs.
+- **Modales** : Logs, Drill-down (waterfall des facteurs + **Source Evidence** structurée), Timeline, **🖥 Ops / Terminals**, **🏦 DeFi** (top protocoles par TVL — DefiLlama, table rang/nom/catégorie/chaînes/TVL/24h/7j + breakdown par catégorie, **données réelles uniquement** : `n/a`/vide honnête si hub off), **📅 Report** (rapport conseil quotidien — résumé + KPIs, distribution des ratings, top BUY/SELL/à-surveiller, table **filtrable signal+rating / triable / recherchable** des 300, détail au clic avec prédiction & ratios ; disclaimer « pas un conseil financier » visible ; `setupDailyReport()`/`fetchDailyReport()`/`renderReport()`, données réelles uniquement, `N/A` honnête), **🔬 Live Source Debug**, Docs.
 - **Source Evidence** (Drill-down) : `renderDecisionSourceEvidence()` rend le bloc `source_evidence` de `/api/decision/{id}` — badge global `complete/partial/missing`, warnings, et une carte par groupe **Market / Risk / Social** (statut `available/stale/unavailable`, provider, exchange, table source, âge, métriques `name/value/contribution/explanation` reliées aux facteurs persistés ; social : auteur/source/texte/relevance/horodatage des vraies lignes, sinon `Social evidence unavailable` + raison). **Jamais de mock comme réel** ; fallback rétro-compatible sur l'ancien champ `evidence` si `source_evidence` absent ; aucun crash sur `null`/groupes/métriques vides.
 
 - **Signal « why »** : chaque carte signal porte une ligne d'explication dérivée de `explainReason(reason_code, s_total)` (le `reason_code` **persisté** est servi par `/api/signals`) — BUY/HOLD/REDUCE/EXIT et le risk gate forçant éventuel. Jamais fabriqué : absente si `reason_code` est nul.
@@ -46,7 +46,7 @@ Cockpit temps réel servi **directement par l'API** sur `http://localhost:8000/`
 - Contraste relevé (`--text-secondary`/`--text-muted`), prix coloré sans clignotement agressif.
 
 ## Endpoints consommés
-REST : `/api/binance/config`, `/api/watchlist`, `/api/market/universe?limit=300`, `/api/market/global`, `/api/market/defi?limit=50`, `/api/market/symbol/{symbol}/klines?range=…`, `/api/historical/{symbol}`, `POST /api/market/active-symbol`, `/api/portfolio`, `/api/signals`, `/api/market-features/{symbol}`, `/api/binance/debug/{symbol}`.
+REST : `/api/binance/config`, `/api/watchlist`, `/api/market/universe?limit=300`, `/api/market/global`, `/api/market/defi?limit=50`, `/api/market/symbol/{symbol}/klines?range=…`, `/api/historical/{symbol}`, `POST /api/market/active-symbol`, `/api/portfolio`, `/api/signals`, `/api/market-features/{symbol}`, `/api/binance/debug/{symbol}`, `/api/reports/daily/latest`, `POST /api/reports/daily/generate`.
 WebSocket : `ws://<host>/ws/live/{symbol}`.
 Ops (modale) : `window.OPS_URL` (défaut `http://<host>:8050`) → `/api/ops/*`, `/ws/ops`.
 

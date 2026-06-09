@@ -124,6 +124,22 @@ Définies dans `.env` (à la racine) ou l'environnement. Source de vérité : `c
 | `MAX_LOG_BUFFER` | 600 | Front : ring buffer logs |
 | `UI_UPDATE_THROTTLE_MS` | 400 | Front : throttle re-render |
 
+### Rapport conseil quotidien (advisory tier — display/report-only)
+| Variable | Défaut | Rôle |
+|---|---|---|
+| `ENABLE_DAILY_REPORT` | True | Active le worker de rapport quotidien (`report_worker`) |
+| `DAILY_REPORT_HOUR` / `DAILY_REPORT_MINUTE` | 0 / 0 | Heure locale de génération (minuit par défaut) |
+| `DAILY_REPORT_TIMEZONE` | UTC | Fuseau IANA (ex. Europe/Paris) ; fallback UTC si `tzdata` absent |
+| `DAILY_REPORT_DIR` | reports | Dossier des artefacts JSON/Markdown (source de vérité, gitignored) |
+| `DAILY_REPORT_UNIVERSE_LIMIT` | 300 | Nb max de cryptos dans le rapport |
+| `DAILY_REPORT_TOP_N` | 10 | Longueur des top-listes (buy/sell/watchlist) |
+| `DAILY_REPORT_HISTORY_LIMIT` | 90 | Nb max de rapports renvoyés par `/history` |
+| `DAILY_REPORT_API_BASE` | http://127.0.0.1:8000 | URL lue par le worker (tiers univers/macro) |
+| `DAILY_REPORT_HTTP_TIMEOUT` | 20.0 | Timeout HTTP des lectures du worker |
+| `DAILY_REPORT_PERSIST_DB` | True | Miroir best-effort de l'index + scores par actif en Postgres (fichiers = vérité) |
+
+> Détail complet : [daily_crypto_report.md](daily_crypto_report.md). Real-data-only ; 1h/7j/30j + market cap = `N/A`.
+
 ### Feature flags / social / ops / métriques / logs
 | Variable | Défaut | Rôle |
 |---|---|---|
@@ -144,6 +160,7 @@ Définies dans `.env` (à la racine) ou l'environnement. Source de vérité : `c
 | `METRICS_ENABLED` | True | Exposition Prometheus |
 | `METRICS_PORT_INGESTOR/FEATURE/SOCIAL/BOT` | 9101/9102/9103/9104 | Ports métriques workers |
 | `METRICS_PORT_AGGREGATOR/OUTCOME` | 9105/9106 | Ports métriques aggregator / outcome_evaluator |
+| `METRICS_PORT_REPORT` | 9107 | Port métriques du `report_worker` |
 | `LOG_LEVEL` | INFO | Niveau de log |
 
 ## <a name="supervisor"></a>Supervisor & Ops API (port 8050)
@@ -164,7 +181,7 @@ Aucun shell brut n'est exposé — uniquement ces actions contrôlées. Incident
 |---|---|
 | API / cockpit | 8000 |
 | Ops supervisor | 8050 |
-| Prometheus workers | 9101–9106 |
+| Prometheus workers | 9101–9107 |
 | PostgreSQL/TimescaleDB | 5432 |
 | Redis | 6379 |
 

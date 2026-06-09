@@ -115,11 +115,12 @@ scripts/dev_supervisor.py  → workers/process_supervisor.ProcessSupervisor
 |---|---|
 | `collectors/` | Collecteurs WS par exchange (Binance/Kraken/Coinbase) + base abstraite (reconnexion/backoff). |
 | `models/` | `canonical.py` — dataclasses normalisées (`TradeTick`, `BBOTick`, `MarketRef`) + `event_uid` idempotent. |
-| `db/` | `writer.py` (écriture batch idempotente + DLQ) et `migrations/` (schéma SQL 001→007, montées au 1ᵉʳ boot Docker). |
-| `workers/` | Process long-running + oneshots : ingestor, aggregator, feature_worker, social_ingestor, antigravity_bot, bootstrap, et `process_supervisor.py` (cœur de supervision). |
+| `db/` | `writer.py` (écriture batch idempotente + DLQ) et `migrations/` (schéma SQL 001→008, montées au 1ᵉʳ boot Docker). |
+| `workers/` | Process long-running + oneshots : ingestor, aggregator, feature_worker, social_ingestor, antigravity_bot, outcome_evaluator, `report_worker` (rapport conseil quotidien), bootstrap, et `process_supervisor.py` (cœur de supervision). |
 | `signal_engine/` | Chaîne décisionnelle réelle : `market_features`, `social_engine`, `risk_engine`, `scorer`. Aucune logique aléatoire. |
 | `paper_execution/` | `engine.py` — moteur de paper trading (règles de risque, slippage, frais, MAJ portefeuille). |
-| `market/` | Hubs in-process temps réel pour le cockpit : `binance_spot.py` (Tier 3), `universe.py` (Tier 1). Display-only. |
+| `market/` | Hubs in-process temps réel pour le cockpit : `binance_spot.py` (Tier 3), `universe.py` (Tier 1), `global_context.py` (macro), `defi.py` (DeFi). Display-only. |
+| `reports/` | Rapport conseil quotidien (advisory tier) : `scoring.py` (formules pures), `generator.py` (JSON+Markdown), `store.py` (fichiers+index DB). Display/report-only. |
 | `social/` | Collecte/analyse sociale : base abstraite, analyzer (entités/sentiment), `mock_collector` (DEV only). |
 | `api/` | `main.py` — API FastAPI + WS + hubs hébergés + service statique du cockpit. |
 | `frontend/` | Cockpit (HTML/CSS/JS vanilla + lightweight-charts). Servi par l'API sur `/`. |

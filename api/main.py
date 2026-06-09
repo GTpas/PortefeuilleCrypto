@@ -22,6 +22,8 @@ from market.universe import BinanceUniverseHub
 from market.global_context import GlobalContextHub
 from market.defi import DefiHub
 from api.decision_evidence import assemble_source_evidence
+from reports import generator as report_generator, store as report_store_mod
+from reports.store import ReportStore
 
 logger = logging.getLogger("api")
 
@@ -737,6 +739,16 @@ async def get_health():
     universe_status = universe_hub.status() if universe_hub else {"enabled": settings.ENABLE_MARKET_UNIVERSE, "connected": False, "count": 0}
     global_status = global_hub.status() if global_hub else {"enabled": settings.ENABLE_GLOBAL_CONTEXT, "connected": False}
     defi_status = defi_hub.status() if defi_hub else {"enabled": settings.ENABLE_DEFI_PROTOCOLS, "connected": False, "count": 0}
+    # Daily-report status: latest generated date + status (best-effort, from disk).
+    daily_report_status = {"enabled": bool(settings.ENABLE_DAILY_REPORT), "latest_date": None}
+    try:
+        hist = _report_store().history(1)
+        if hist:
+            daily_report_status.update({"latest_date": hist[0].get("report_date"),
+                                        "status": hist[0].get("status"),
+                                        "universe_size": hist[0].get("universe_size")})
+    except Exception:  # pragma: no cover - defensive
+        pass
     return {
         "status": "ok" if (db_status == "up" and any_fresh) else "degraded",
         "db_status": db_status,
@@ -746,6 +758,7 @@ async def get_health():
         "universe": universe_status,
         "global_context": global_status,
         "defi_protocols": defi_status,
+        "daily_report": daily_report_status,
         "symbols": symbols,
     }
 
@@ -918,6 +931,8 @@ async def get_binance_config():
         "global_context_enabled": bool(settings.ENABLE_GLOBAL_CONTEXT and global_hub is not None),
         # DeFi protocol tier (top protocols by TVL) availability.
         "defi_protocols_enabled": bool(settings.ENABLE_DEFI_PROTOCOLS and defi_hub is not None),
+        # Daily Crypto Intelligence Report (advisory tier) availability.
+        "daily_report_enabled": bool(settings.ENABLE_DAILY_REPORT),
         # Frontend memory bounds (the cockpit enforces these client-side).
         "frontend_limits": {
             "max_candles_per_symbol": settings.MAX_CANDLES_PER_SYMBOL,
@@ -1117,6 +1132,150 @@ async def get_binance_klines(symbol: str):
     # Report the hub's LIVE interval (changes with the selected range), not the
     # static default — otherwise range-switched candles would be mislabeled.
     return {"interval": binance_hub.candle_interval, "candles": binance_hub.klines(symbol)}
+
+
+# ── Daily Crypto Intelligence Report (advisory tier) ─────────────────────────
+# Display/report-only: the report is built from the same real-data tiers the
+# cockpit uses (universe 24h ticker + macro context). Files are the source of
+# truth (reports/*.json|.md); the DB index is a best-effort mirror. Real data
+# only — unavailable inputs are N/A, predictions are prudent (probabilities).
+
+_DATE_RE_API = __import__("re").compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _resolve_report_dir() -> str:
+    d = settings.DAILY_REPORT_DIR
+    if not os.path.isabs(d):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        d = os.path.join(root, d)
+    return d
+
+
+def _report_store() -> ReportStore:
+    return ReportStore(_resolve_report_dir())
+
+
+def _report_tz():
+    name = settings.DAILY_REPORT_TIMEZONE
+    if not name or name.upper() == "UTC":
+        return timezone.utc
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(name)
+    except Exception:  # pragma: no cover - environment dependent
+        return timezone.utc
+
+
+async def _generate_report_inprocess(trigger: str = "manual") -> dict:
+    """Build + persist a report from the in-process hubs (no HTTP round-trip).
+    Returns the full report dict (also persisted to disk + best-effort DB)."""
+    from metrics import (daily_report_runs_total, daily_report_build_latency_ms,
+                         daily_report_assets, daily_report_last_success_ts,
+                         daily_report_signal_counts, daily_report_errors_total)
+    daily_report_runs_total.labels(trigger=trigger).inc()
+    t0 = time.time()
+    rows = universe_hub.universe(settings.DAILY_REPORT_UNIVERSE_LIMIT) if universe_hub else []
+    global_ctx = global_hub.snapshot() if global_hub else None
+    now_local = datetime.now(timezone.utc).astimezone(_report_tz())
+    report = report_generator.build_daily_report(
+        rows, global_ctx, generated_at=datetime.now(timezone.utc).isoformat(),
+        report_date=now_local.date().isoformat(), top_n=settings.DAILY_REPORT_TOP_N)
+    report["status"] = "ok" if rows else "error"
+    if not rows:
+        report["error_message"] = "universe hub unavailable (no real rows)"
+
+    markdown = report_generator.render_markdown(report)
+    store = _report_store()
+    entry = store.save(report, markdown)
+    report["_json_path"] = entry["json_path"]
+    report["_markdown_path"] = entry["markdown_path"]
+
+    daily_report_build_latency_ms.observe((time.time() - t0) * 1000.0)
+    daily_report_assets.set(report.get("universe_size", 0))
+    for sig, n in (report.get("signal_counts") or {}).items():
+        daily_report_signal_counts.labels(signal=sig).set(n)
+    if rows:
+        daily_report_last_success_ts.set(time.time())
+    else:
+        daily_report_errors_total.inc()
+
+    # Best-effort DB mirror (files remain the source of truth).
+    if settings.DAILY_REPORT_PERSIST_DB and pool is not None:
+        try:
+            async with pool.acquire() as conn:
+                await report_store_mod.ensure_schema(conn)
+                await report_store_mod.upsert_index(conn, report, status=report.get("status", "ok"),
+                                                    error_message=report.get("error_message"))
+                if report.get("assets"):
+                    await report_store_mod.upsert_asset_scores(conn, report)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("report DB mirror failed: %s", e)
+    return report
+
+
+@app.get("/api/reports/daily/latest")
+async def get_report_latest():
+    """The most recent generated daily report (full JSON). Honest empty payload
+    if none has been generated yet."""
+    store = _report_store()
+    rep = store.latest()
+    if not rep:
+        return {"available": False, "reason": "no_report_generated_yet",
+                "enabled": bool(settings.ENABLE_DAILY_REPORT)}
+    return {"available": True, **rep}
+
+
+@app.get("/api/reports/daily/history")
+async def get_report_history(limit: int = None):
+    """List of generated reports (newest first, slim index rows)."""
+    store = _report_store()
+    lim = limit or settings.DAILY_REPORT_HISTORY_LIMIT
+    return {"reports": store.history(lim), "enabled": bool(settings.ENABLE_DAILY_REPORT)}
+
+
+@app.get("/api/reports/daily/latest/assets/{symbol:path}")
+async def get_report_latest_asset(symbol: str):
+    """Detailed analysis of one crypto in the latest report (honest 'unavailable')."""
+    store = _report_store()
+    rep = store.latest()
+    if not rep:
+        return {"available": False, "reason": "no_report_generated_yet", "symbol": symbol}
+    for a in rep.get("assets", []):
+        if a.get("symbol") == symbol or a.get("base") == symbol:
+            return {"available": True, "report_date": rep.get("report_date"),
+                    "generated_at": rep.get("generated_at"), "asset": a}
+    return {"available": False, "reason": "symbol_not_in_report", "symbol": symbol,
+            "report_date": rep.get("report_date")}
+
+
+@app.post("/api/reports/daily/generate")
+async def post_report_generate():
+    """Manually trigger a report generation (admin/test). Builds from the live
+    in-process hubs and persists it. Returns a slim summary."""
+    if not settings.ENABLE_DAILY_REPORT:
+        return {"ok": False, "error": "daily_report_disabled"}
+    try:
+        rep = await _generate_report_inprocess(trigger="manual")
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "report_date": rep.get("report_date"),
+            "generated_at": rep.get("generated_at"), "status": rep.get("status"),
+            "universe_size": rep.get("universe_size", 0),
+            "market_regime": rep.get("market_regime"),
+            "signal_counts": rep.get("signal_counts"),
+            "json_path": rep.get("_json_path"), "markdown_path": rep.get("_markdown_path")}
+
+
+@app.get("/api/reports/daily/{date}")
+async def get_report_by_date(date: str):
+    """The daily report for a specific date (YYYY-MM-DD)."""
+    if not _DATE_RE_API.match(date or ""):
+        return {"available": False, "reason": "invalid_date_format", "expected": "YYYY-MM-DD"}
+    store = _report_store()
+    rep = store.load(date)
+    if not rep:
+        return {"available": False, "reason": "report_not_found", "report_date": date}
+    return {"available": True, **rep}
 
 
 # ── Historical OHLCV ───────────────────────
