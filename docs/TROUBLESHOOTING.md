@@ -49,6 +49,8 @@
 | `eligible ≥ 300` mais `final < 300` | cap | vérifier `UNIVERSE_LIMIT` / `BACKEND_MAX_SYMBOLS` |
 | `raw_binance_tickers_count` ~0 | REST Binance indisponible | réseau / fallbacks `BINANCE_REST_FALLBACKS` |
 
+> **Diagnostic en une commande** : `python scripts/diagnose_universe.py --limit 300` — wrappe `GET /api/market/universe/debug` et imprime demandé/éligible/chargé + la **partition des rejets** (stable/leverage/volume/not-spot/inactive) avec exemples, une **cause dominante** (`capped_by_limit` / `low_volume_floor` / `rest_unavailable` / `dominated_by_*`) et une recommandation. `--json` pour le brut, `--strict` pour `exit 1` si chargé < demandé. Latence des endpoints d'affichage : `python scripts/benchmark_snapshot_api.py --runs 30` (p50/p95/p99 sur `/api/market/universe` + klines).
+
 ## Social
 
 | Symptôme | Cause | Fix |

@@ -54,6 +54,18 @@ Le supervisor évite d'ouvrir 6 terminaux — préférez-le.
      -c "SELECT symbol, max(bucket_start) FROM ohlcv_1s WHERE exchange_code='binance' GROUP BY 1;"
    ```
 6. **Marché** : badge cockpit `Connecting… → Waiting data → Live`. **Jamais `Live` sans bougie réelle.**
+7. **Univers (combien sur N + pourquoi le reste manque)** :
+   ```bash
+   python scripts/diagnose_universe.py --limit 300        # rapport lisible (cause + reco)
+   python scripts/diagnose_universe.py --limit 300 --json # verdict JSON
+   python scripts/diagnose_universe.py --limit 300 --strict  # exit 1 si chargé < demandé (CI/smoke)
+   ```
+   Tape `GET /api/market/universe/debug` (aucune DB). Si chargé < demandé, la **cause dominante** et la **partition des rejets** sont imprimées.
+8. **Latence des endpoints d'affichage** :
+   ```bash
+   python scripts/benchmark_snapshot_api.py --runs 30                      # univers + klines
+   python scripts/benchmark_snapshot_api.py --symbol BTC/USDT --range 1D   # p50/p95/p99
+   ```
 
 ## Lire les logs
 - **Cockpit** : panneau **🖥 Ops / Terminals** (logs temps réel filtrables par process + niveau).
