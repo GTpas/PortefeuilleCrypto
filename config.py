@@ -114,6 +114,34 @@ class Settings(BaseSettings):
     # and the API filters it out of evidence/scores regardless.
     ENABLE_MOCK_SOCIAL: bool = Field(default=False, description="Run the simulated social collector (DEV ONLY — never present its output as real data)")
 
+    # ── Real social source: public crypto-news RSS feeds (ToS-safe) ───────────
+    # The first REAL social/news connector behind BaseSocialCollector. RSS feeds
+    # are published for syndication, so polling them is ToS-safe (unlike scraping
+    # X/Reddit). Off by default; turn on to feed genuine (non-mock) content into
+    # the social pipeline. Polled at most every RSS_POLL_SECONDS to stay polite.
+    ENABLE_RSS_SOCIAL: bool = Field(default=False, description="Run the real RSS news collector (public crypto-news feeds, ToS-safe). Output is REAL, never tagged mock")
+    RSS_FEEDS: list[str] = Field(
+        default=[
+            "https://www.coindesk.com/arc/outboundfeeds/rss/",
+            "https://cointelegraph.com/rss",
+            "https://decrypt.co/feed",
+            "https://www.theblock.co/rss.xml",
+        ],
+        description="Public RSS/Atom feed URLs for the real news collector",
+    )
+    RSS_POLL_SECONDS: int = Field(default=120, description="Minimum interval (s) between RSS feed fetches (politeness / ToS)")
+    RSS_HTTP_TIMEOUT: float = Field(default=10.0, description="Per-feed HTTP fetch timeout (s)")
+
+    # ── Ex-post outcome evaluation (backtest + actor credibility) ─────────────
+    # The outcome_evaluator worker scores past decisions against realized price
+    # moves (outcome_eval) and re-derives actor credibility (source_influence_
+    # snapshot + tracked_actor.influence_score). Read-mostly; safe to leave on.
+    ENABLE_OUTCOME_EVAL: bool = Field(default=True, description="Run the ex-post outcome evaluator (fills outcome_eval + source_influence_snapshot)")
+    OUTCOME_EVAL_INTERVAL_S: int = Field(default=60, description="How often the outcome evaluator scans for matured decisions (s)")
+    OUTCOME_HORIZONS: list[str] = Field(default=["1h", "4h", "24h"], description="Evaluation horizons after each decision (subset of 15m|1h|4h|24h|3d)")
+    OUTCOME_HOLD_BAND_PCT: float = Field(default=0.5, description="A HOLD decision counts as correct if |return| over the horizon stays within this band (%)")
+    OUTCOME_PRICE_TOLERANCE_S: int = Field(default=300, description="Max gap (s) between the horizon target time and the nearest OHLCV close used as the horizon price")
+
     # Redis
     REDIS_URL: str = Field(default="redis://localhost:6379/0", description="Redis connection URL for queue/cache")
 
@@ -132,6 +160,8 @@ class Settings(BaseSettings):
     METRICS_PORT_FEATURE: int = Field(default=9102)
     METRICS_PORT_SOCIAL: int = Field(default=9103)
     METRICS_PORT_BOT: int = Field(default=9104)
+    METRICS_PORT_AGGREGATOR: int = Field(default=9105)
+    METRICS_PORT_OUTCOME: int = Field(default=9106)
 
     # Logging
     LOG_LEVEL: str = Field(default="INFO")

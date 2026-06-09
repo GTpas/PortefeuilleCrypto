@@ -6,6 +6,15 @@ Format : `## [date] — titre court` puis **Quoi / Pourquoi / Impact**.
 
 ---
 
+## [2026-06-09] — Observabilité aggregator + 1ʳᵉ source sociale réelle (RSS) + évaluation ex-post + CI pytest
+- **Quoi** :
+  1. **Aggregator instrumenté** (`workers/aggregator.py`) : serveur Prometheus (port 9105) + `aggregator_lag_ms` (fraîcheur/lag de la source = âge du `trade_tick` le plus récent), `aggregator_cycles_total`, `aggregator_rows_upserted_total`, `aggregator_cycle_latency_ms`, `worker_last_success_ts`/`worker_events_failed_total{worker="aggregator"}`. C'était le seul worker sans métriques.
+  2. **Vraie source sociale** : `social/rss_collector.py` (`RSSCollector` derrière `BaseSocialCollector`) — poll de flux **RSS/Atom publics** de news crypto (ToS-safe). Parsing pur `parse_feed()` (RSS 2.0 + Atom, strip HTML, dates RFC-822/ISO), politesse `RSS_POLL_SECONDS`. Câblé dans `workers/social_ingestor.py` derrière `ENABLE_RSS_SOCIAL`. Source `rss_news` → **réelle** (jamais filtrée comme mock).
+  3. **Évaluation ex-post** : `workers/outcome_evaluator.py` remplit `outcome_eval` (return + `was_correct` par horizon, prix depuis `ohlcv_1s`, idempotent) et `source_influence_snapshot` + MAJ `tracked_actor.influence_score` (prior bayésien). Activé enfin le backtest + la crédibilité acteurs. Enregistré dans `dev_supervisor.build_specs()` (port métriques 9106).
+  4. **CI pytest** : `.github/workflows/ci.yml` (`pytest -q`, offline) à côté de `docs-check`.
+- **Pourquoi** : combler les TODO d'observabilité (aggregator aveugle), de données réelles (social = mock only) et de boucle d'apprentissage (tables d'éval vides), et garantir la non-régression des tests en CI.
+- **Impact** : nouveaux env `ENABLE_RSS_SOCIAL`/`RSS_*`, `ENABLE_OUTCOME_EVAL`/`OUTCOME_*`, `METRICS_PORT_AGGREGATOR/OUTCOME` ; nouveau worker dans l'ordre supervisé (… → antigravity_bot → **outcome_evaluator** → api) ; ports Prometheus 9101–9106. Tests : +`test_rss_collector` (8) +`test_outcome_eval` (7) → **168 tests**. Pas de migration (tables 007 réutilisées).
+
 ## [2026-06-09] — Documentation complète + règle « doc obligatoire »
 - **Quoi** : création de `docs/` (ARCHITECTURE, API, DATABASE, WORKERS, FRONTEND, DEPLOYMENT, RUNBOOK, TROUBLESHOOTING, PERFORMANCE, CHANGELOG_TECH), `CONTRIBUTING.md`, `.github/pull_request_template.md`, `scripts/check_docs_sync.py`, `.github/workflows/docs-check.yml`, hook `.githooks/pre-commit` ; enrichissement de `CLAUDE.md` (carte projet, instructions permanentes, checklist commit) et du `README.md`.
 - **Pourquoi** : rendre le projet reprenable rapidement et empêcher la doc de devenir obsolète (contrôle automatisé de synchro doc↔code).

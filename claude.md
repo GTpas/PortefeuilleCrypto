@@ -39,7 +39,7 @@ Schéma complet : [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#2-schéma-des-flux
 `collectors/` (WS par exchange) · `models/` (canonical + event_uid) · `db/` (writer batch+DLQ, migrations) · `workers/` (ingestor, aggregator, feature_worker, social_ingestor, antigravity_bot, bootstrap, process_supervisor) · `signal_engine/` (market_features, social_engine, risk_engine, scorer) · `paper_execution/` (engine) · `market/` (hubs binance_spot, universe) · `social/` (base, analyzer, mock) · `api/` (FastAPI + WS + hubs + cockpit statique) · `frontend/` (cockpit) · `scripts/` (supervisor + .ps1) · `tests/` (offline) · `docs/`.
 
 ### Repères rapides
-- **Workers** → [docs/WORKERS.md](docs/WORKERS.md). Lancement : `python -m workers.<nom>` (`PYTHONPATH=.`). Ordre supervisé : docker→bootstrap→ingestor→aggregator→feature_worker→social_ingestor→antigravity_bot→api.
+- **Workers** → [docs/WORKERS.md](docs/WORKERS.md). Lancement : `python -m workers.<nom>` (`PYTHONPATH=.`). Ordre supervisé : docker→bootstrap→ingestor→aggregator→feature_worker→social_ingestor→antigravity_bot→outcome_evaluator→api.
 - **Endpoints** → [docs/API.md](docs/API.md). Principaux : `/api/health`, `/api/watchlist`, `/api/signals`, `/api/decision/{id}`, `/api/market/universe`, `/api/binance/debug/{symbol}`, `WS /ws/live/{symbol}`. Ops sur :8050.
 - **Tables** → [docs/DATABASE.md](docs/DATABASE.md). Cœur : `trade_tick`, `bbo_tick`, `ohlcv_1s`, `market_feature_1s`, `decision_snapshot`/`decision_factor`/`signal_quality_audit`, `paper_portfolio`/`paper_position`/`paper_trade`, `portfolio_state`. ⚠️ pas de table `paper_order` (ordres = `paper_trade`).
 - **Variables d'env** → [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). Toutes dans `config.py`/`.env`. Jamais de secret en dur.
@@ -47,7 +47,7 @@ Schéma complet : [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#2-schéma-des-flux
 - **Rollback** → [docs/RUNBOOK.md](docs/RUNBOOK.md) : `git revert` ; DLQ + `drop_chunks` pour l'ingestion ; migration inverse (jamais éditer une migration appliquée).
 - **Conventions de nommage** → [CONTRIBUTING.md](CONTRIBUTING.md) : branches `type/sujet`, commits `type: …`, migrations `NNN_desc.sql` idempotentes, symboles canoniques `BASE/QUOTE`.
 - **Perf & sécurité** → [docs/PERFORMANCE.md](docs/PERFORMANCE.md) : bornes mémoire front/back explicites ; binds `127.0.0.1` + CORS `*` = **local only**, ne pas exposer sans durcir.
-- **TODO techniques connus** : voir « ce qui n'est PAS encore final » ci-dessous + `outcome_eval`/`source_influence_snapshot` créées mais non remplies (pas de backtest/crédibilité), `tracked_site`/`tracked_asset_source_map` inutilisées, social = mock-only, aggregator non instrumenté.
+- **TODO techniques connus** : voir « ce qui n'est PAS encore final » ci-dessous + `tracked_site`/`tracked_asset_source_map` inutilisées. *(Résolus le 2026-06-09 : aggregator instrumenté port 9105 ; `outcome_eval`/`source_influence_snapshot` remplies par `workers/outcome_evaluator.py` ; 1ʳᵉ vraie source sociale RSS via `ENABLE_RSS_SOCIAL` ; CI pytest `.github/workflows/ci.yml`.)*
 - **Historique des décisions** → [docs/CHANGELOG_TECH.md](docs/CHANGELOG_TECH.md) + sections PR1→PR5 plus bas.
 
 ## 🤖 Instructions permanentes pour Claude (documentation)
@@ -91,13 +91,16 @@ Le dépôt contient déjà, et **fonctionnel / non-aléatoire** :
 - API FastAPI riche (détail décision, facteurs, sources, market-features, social-history, logs système, WS live) + interface cockpit
 
 Ce qui n’est PAS encore final (vraies priorités) :
-- **Données social/news = MOCK uniquement** : `social/mock_collector.py` est la seule source. Les moteurs sont réels mais tournent sur des données fabriquées. Tables `tracked_site` / `tracked_asset_source_map` créées mais inutilisées. → brancher de vraies sources (X, Reddit, RSS, annonces exchange).
-- **Observabilité Prometheus absente** : `prometheus-client` est dans `requirements.txt` mais **zéro instrumentation** dans le code. `market_data_age_ms`/`social_data_age_ms` écrits à 0.
-- **`docker-compose.yml` = infra only** (db + redis). Aucun service applicatif (workers/api/frontend) → compose full-stack manquant.
-- **Profondeur de carnet = heuristique** et incohérente : `market_features.py` utilise `(bid·q+ask·q)·5.0`, `antigravity_bot.py` utilise `bid·q·10`. Deux sources de vérité. Flag `ENABLE_L2_BOOK=False`.
-- **Pas de boucle d'évaluation ex-post** : tables `outcome_eval` / `source_influence_snapshot` créées mais aucun worker ne les remplit → pas de backtest ni d'apprentissage de crédibilité des acteurs.
-- **Aucun test** malgré `pytest` dans les dépendances.
-- **Garde-fou staleness manquant** : le scorer/bot utilisent le dernier `bbo_tick` sans vérifier son âge → risque de décision sur données périmées.
+- **Vraie source sociale = RSS news uniquement** (depuis 2026-06-09, `social/rss_collector.py` derrière `ENABLE_RSS_SOCIAL`, OFF par défaut). `social/mock_collector.py` reste dispo en dev (`ENABLE_MOCK_SOCIAL`, tagué mock). Tables `tracked_site` / `tracked_asset_source_map` créées mais toujours inutilisées. → étendre aux sources gated (X, Reddit, annonces exchange) si besoin.
+- **Profondeur de carnet = heuristique** et incohérente côté chemin DB : voir `market_features.py`. Flag `ENABLE_L2_BOOK=False`.
+- **Backtest naissant** : `workers/outcome_evaluator.py` remplit `outcome_eval` + `source_influence_snapshot` (return/horizon + crédibilité acteurs). La crédibilité n'a de contenu réel que si une vraie source sociale + evidence links existent.
+- **Garde-fou staleness** : géré côté risk_engine (gate `data_stale`) ; le chemin DB du bot reste sur le dernier `bbo_tick`.
+
+Résolu le 2026-06-09 (ne plus lister comme TODO) :
+- ~~Observabilité Prometheus absente~~ → instrumentation présente (PR1) ; **aggregator** désormais instrumenté (port 9105, `aggregator_lag_ms` & co).
+- ~~Pas de boucle d'évaluation ex-post~~ → `workers/outcome_evaluator.py`.
+- ~~Aucun test~~ → suite `pytest` (168 tests) + CI `.github/workflows/ci.yml`.
+- `docker-compose.yml` = infra only **est voulu** (workers/api sous `dev_supervisor`, cf. plus bas).
 
 ## Priorités techniques
 Quand tu travailles sur ce projet, priorité à:
@@ -272,12 +275,12 @@ $env:PYTHONPATH="."; python .\scripts\dev_supervisor.py
 |---|---|
 | API / cockpit | 8000 |
 | Ops supervisor (API + WS) | 8050 |
-| Prometheus workers | 9101–9104 |
+| Prometheus workers | 9101–9106 |
 | PostgreSQL/TimescaleDB | 5432 |
 | Redis | 6379 |
 
 ### Tests
-`pytest -q` (offline, pas de DB requise) : `test_scorer_thresholds`, `test_social_availability` (garde-fous anti-mock), `test_process_supervisor` (capture stdout/stderr + crash + traceback sur **vrais** subprocess), `test_ops_api` (logique Ops + routes), `test_launch_scripts` (tasks.json + scripts PowerShell valides), `test_engine_decimal`, `test_binance_spot` (hub temps réel + ranges/active-symbol/cache borné), `test_chart_live` (feed graphique : anti-freeze, statut CHART, isolation par symbole), `test_market_universe` (univers 300 : exclusions, score tendance, ranking), `test_deploy_config` (.dockerignore + durcissement compose + settings). **120 tests** au total.
+`pytest -q` (offline, pas de DB requise) : `test_scorer_thresholds`, `test_social_availability` (garde-fous anti-mock), `test_process_supervisor` (capture stdout/stderr + crash + traceback sur **vrais** subprocess), `test_ops_api` (logique Ops + routes), `test_launch_scripts` (tasks.json + scripts PowerShell valides), `test_engine_decimal`, `test_binance_spot` (hub temps réel + ranges/active-symbol/cache borné), `test_chart_live` (feed graphique : anti-freeze, statut CHART, isolation par symbole), `test_market_universe` (univers 300 : exclusions, score tendance, ranking), `test_deploy_config` (.dockerignore + durcissement compose + settings), `test_rss_collector` (parsing RSS 2.0/Atom réel, strip HTML, dates, anti-mock, politesse), `test_outcome_eval` (return/correctness/horizon — logique pure du backtest). **168 tests** au total. CI : `.github/workflows/ci.yml` (`pytest -q`) en plus de `docs-check`.
 
 ## Gestion automatique des terminaux par Claude
 
@@ -304,12 +307,14 @@ Liste **réelle**, vérifiée par rapport au disque (`scripts/dev_supervisor.bui
 | `feature_worker` | `python -m workers.feature_worker` | long-running | non | oui |
 | `social_ingestor` | `python -m workers.social_ingestor` | long-running | non | oui |
 | `antigravity_bot` | `python -m workers.antigravity_bot` | long-running | non | oui |
+| `outcome_evaluator` | `python -m workers.outcome_evaluator` | long-running | non | oui |
 | `api` | `python -m uvicorn api.main:app --host 127.0.0.1 --port 8000` | long-running | non | oui |
 
 Notes de vérité (ne pas s'en écarter) :
 - **Pas de process frontend séparé.** Le cockpit est servi par l'API elle-même (`api/main.py` monte `StaticFiles` sur `/` au port 8000). Ne **jamais** lancer `python -m http.server 8000` — cela entrerait en conflit avec l'API sur le même port.
 - **`--reload` est volontairement omis** sous supervision pour que le PID suivi soit le vrai serveur, pas le process reloader parent.
-- **`social_ingestor`** tourne mais ne produit de la donnée *réelle* que si une vraie source est branchée ; avec `ENABLE_MOCK_SOCIAL=False` (défaut) il n'émet rien de réel (voir règle anti-mock PR2).
+- **`social_ingestor`** tourne mais ne produit de la donnée *réelle* que si une vraie source est branchée : activer **`ENABLE_RSS_SOCIAL=True`** (flux RSS news publics, vraie source) ; sinon avec `ENABLE_RSS_SOCIAL=False` **et** `ENABLE_MOCK_SOCIAL=False` (défauts) il reste idle, aucun signal réel (voir règle anti-mock PR2).
+- **`outcome_evaluator`** : évaluation ex-post (read-mostly) ; remplit `outcome_eval` + `source_influence_snapshot` et met à jour `tracked_actor.influence_score`. Gated `ENABLE_OUTCOME_EVAL` (défaut True).
 - Règle absolue : **ne pas inventer de worker** et **ne pas documenter une commande dont le fichier n'existe pas**. Si un fichier est absent, le superviseur le saute silencieusement (`optional`) ou ne l'ajoute pas.
 
 ### Capture des logs & erreurs

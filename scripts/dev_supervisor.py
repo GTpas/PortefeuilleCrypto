@@ -60,6 +60,7 @@ def build_specs() -> list[ProcessSpec]:
         ("feature_worker", "feature_worker.py"),
         ("social_ingestor", "social_ingestor.py"),
         ("antigravity_bot", "antigravity_bot.py"),
+        ("outcome_evaluator", "outcome_evaluator.py"),
     ]
     for name, fname in long_running:
         if _exists("workers", fname):

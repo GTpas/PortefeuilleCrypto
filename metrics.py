@@ -101,6 +101,32 @@ universe_cache_age_ms = Gauge(
     "universe_cache_age_ms", "Age (ms) of the current universe snapshot"
 )
 
+# ── Aggregator (trade_tick → ohlcv_1s) ──────────
+aggregator_cycles_total = Counter(
+    "aggregator_cycles_total", "Aggregation cycles run (loop iterations)"
+)
+aggregator_rows_upserted_total = Counter(
+    "aggregator_rows_upserted_total", "OHLCV 1s rows upserted by the aggregator"
+)
+aggregator_lag_ms = Gauge(
+    "aggregator_lag_ms", "Age (ms) of the newest trade_tick at aggregation time (source freshness/lag)"
+)
+aggregator_cycle_latency_ms = Histogram(
+    "aggregator_cycle_latency_ms", "Time to run one aggregation cycle (ms)",
+    buckets=(5, 10, 25, 50, 100, 250, 500, 1000, 5000),
+)
+
+# ── Outcome evaluation (ex-post decision quality) ──────────
+outcome_evals_written_total = Counter(
+    "outcome_evals_written_total", "Outcome evaluations written", ["horizon"]
+)
+outcome_eval_accuracy = Gauge(
+    "outcome_eval_accuracy", "Rolling share of correct decisions per horizon [0,1]", ["horizon"]
+)
+actor_influence_updates_total = Counter(
+    "actor_influence_updates_total", "tracked_actor.influence_score recomputations written"
+)
+
 # ── Storage / writer ─────────────────────────
 db_write_latency_ms = Histogram(
     "db_write_latency_ms", "Batch DB write latency (ms)",

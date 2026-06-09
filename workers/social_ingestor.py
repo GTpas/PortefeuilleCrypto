@@ -16,6 +16,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import settings
 from social.mock_collector import MockSocialCollector
+from social.rss_collector import RSSCollector
 from social.content_analyzer import ContentAnalyzer
 from signal_engine.social_engine import SocialEngine
 from metrics import (
@@ -33,12 +34,23 @@ async def run_social_ingestor():
     start_metrics_server(settings.METRICS_PORT_SOCIAL, settings.METRICS_ENABLED)
     pool = await asyncpg.create_pool(settings.DATABASE_URL)
 
-    # Build the list of REAL collectors. There is no real social connector yet,
-    # so the only available collector is the simulated one, gated behind an
-    # explicit dev flag. When no collector is enabled the worker stays alive but
-    # writes NO social content/signals — the cockpit then honestly reports
-    # "no real social feed configured" instead of fabricated data.
+    # Build the list of collectors. The RSS news collector is a REAL source
+    # (ENABLE_RSS_SOCIAL); the simulated collector (ENABLE_MOCK_SOCIAL) is a dev
+    # opt-in and always tagged mock. When NO collector is enabled the worker
+    # stays alive but writes NO social content/signals — the cockpit then
+    # honestly reports "no real social feed configured" instead of fabricated data.
     collectors = []
+    # Real source first: public crypto-news RSS feeds (ToS-safe, never mock).
+    if settings.ENABLE_RSS_SOCIAL and settings.RSS_FEEDS:
+        logger.info(
+            "ENABLE_RSS_SOCIAL is ON — polling %d real RSS news feed(s) every %ds.",
+            len(settings.RSS_FEEDS), settings.RSS_POLL_SECONDS,
+        )
+        collectors.append(RSSCollector(
+            pool, settings.RSS_FEEDS,
+            timeout=settings.RSS_HTTP_TIMEOUT,
+            poll_seconds=settings.RSS_POLL_SECONDS,
+        ))
     if settings.ENABLE_MOCK_SOCIAL:
         logger.warning(
             "ENABLE_MOCK_SOCIAL is ON — running the SIMULATED social collector. "

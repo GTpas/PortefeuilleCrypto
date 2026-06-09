@@ -67,11 +67,11 @@ Index clés : `(exchange_code, symbol, ts_event DESC)` sur trade/bbo ; GIN `payl
 | `signal_quality_audit` | Audit qualité/fraîcheur | `social_sources_count`, `market_data_age_ms`, `social_data_age_ms`, `has_sufficient_social/market`, `quality_grade` (full/partial/degraded/mock), `degradation_reasons[]`. |
 | `signal_log` | Ancien log de signaux (migration 002) | Conservé ; remplacé par `decision_snapshot`. |
 
-### Évaluation ex-post & crédibilité (migration 007 — créées, **non remplies**)
+### Évaluation ex-post & crédibilité (migration 007 — **remplies** par `outcome_evaluator`)
 | Table | Rôle | État |
 |---|---|---|
-| `outcome_eval` | Retour ex-post (return par horizon 1h/4h/24h/3d, `was_correct`) | **TODO** : aucun worker ne la remplit → pas de backtest. |
-| `source_influence_snapshot` | Crédibilité acteur dans le temps (`historical_lift`, `accuracy_rate`) | **TODO** : aucun worker ne la remplit. |
+| `outcome_eval` | Retour ex-post (return par horizon 1h/4h/24h, `was_correct`) | **Rempli** par `workers/outcome_evaluator.py` : prix décision/horizon depuis `ohlcv_1s`, écriture idempotente (1 ligne par décision×horizon). |
+| `source_influence_snapshot` | Crédibilité acteur dans le temps (`historical_lift`, `accuracy_rate`) | **Rempli** par `outcome_evaluator` (accuracy des décisions où l'acteur est evidence, via `decision_evidence_link`) ; met aussi à jour `tracked_actor.influence_score` (prior bayésien). N'a de contenu réel que si une vraie source sociale + evidence links existent. |
 
 ### Logs système (migration 006)
 | Table | Rôle | Notes |

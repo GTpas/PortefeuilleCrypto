@@ -104,10 +104,19 @@ Définies dans `.env` (à la racine) ou l'environnement. Source de vérité : `c
 | `ENABLE_COINGECKO` | False | Worker enrichissement CoinGecko |
 | `ENABLE_DEX` | False | Ingestion DEX (Uniswap) |
 | `ENABLE_MOCK_SOCIAL` | **False** | Collecteur social **simulé** (DEV ONLY — jamais présenté comme réel) |
+| `ENABLE_RSS_SOCIAL` | False | Collecteur **RSS news réel** (flux publics, ToS-safe) — vraie source |
+| `RSS_FEEDS` | CoinDesk/Cointelegraph/Decrypt/TheBlock | Liste de flux RSS/Atom (JSON) |
+| `RSS_POLL_SECONDS` / `RSS_HTTP_TIMEOUT` | 120 / 10 | Intervalle mini de fetch (politesse) / timeout HTTP par flux |
+| `ENABLE_OUTCOME_EVAL` | True | Worker d'évaluation ex-post (`outcome_eval` + crédibilité acteurs) |
+| `OUTCOME_EVAL_INTERVAL_S` | 60 | Cadence de scan des décisions matures |
+| `OUTCOME_HORIZONS` | `["1h","4h","24h"]` | Horizons d'évaluation (subset `15m\|1h\|4h\|24h\|3d`) |
+| `OUTCOME_HOLD_BAND_PCT` | 0.5 | Bande (%) sous laquelle un HOLD est jugé correct |
+| `OUTCOME_PRICE_TOLERANCE_S` | 300 | Écart max (s) entre l'horizon visé et le close OHLCV utilisé |
 | `OPS_HOST` / `OPS_PORT` | 127.0.0.1 / 8050 | Bind Ops supervisor |
 | `OPS_MAX_RESTARTS` / `OPS_RESTART_WINDOW_S` | 5 / 120 | Budget glissant de restart |
 | `METRICS_ENABLED` | True | Exposition Prometheus |
 | `METRICS_PORT_INGESTOR/FEATURE/SOCIAL/BOT` | 9101/9102/9103/9104 | Ports métriques workers |
+| `METRICS_PORT_AGGREGATOR/OUTCOME` | 9105/9106 | Ports métriques aggregator / outcome_evaluator |
 | `LOG_LEVEL` | INFO | Niveau de log |
 
 ## <a name="supervisor"></a>Supervisor & Ops API (port 8050)
@@ -128,7 +137,7 @@ Aucun shell brut n'est exposé — uniquement ces actions contrôlées. Incident
 |---|---|
 | API / cockpit | 8000 |
 | Ops supervisor | 8050 |
-| Prometheus workers | 9101–9104 |
+| Prometheus workers | 9101–9106 |
 | PostgreSQL/TimescaleDB | 5432 |
 | Redis | 6379 |
 
