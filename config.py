@@ -190,6 +190,9 @@ class Settings(BaseSettings):
     DAILY_REPORT_API_BASE: str = Field(default="http://127.0.0.1:8000", description="Base URL the report worker calls to read the live universe/macro tiers")
     DAILY_REPORT_HTTP_TIMEOUT: float = Field(default=20.0, description="HTTP timeout (s) for the report worker's reads from the local API")
     DAILY_REPORT_PERSIST_DB: bool = Field(default=True, description="Best-effort mirror the report index (+ per-asset scores) into Postgres (files remain the source of truth)")
+    ENABLE_TOP1000_WATCHLIST: bool = Field(default=True, description="Enrich the daily report with the CoinGecko top-1000 external watchlist (free keyless tier, fetched once per generation, best-effort)")
+    TOP1000_PAGES: int = Field(default=4, description="CoinGecko /coins/markets pages of 250 fetched for the external watchlist (4 = top 1000)")
+    TOP1000_MIN_VOLUME_USD: float = Field(default=1_000_000.0, description="24h volume floor (USD) below which an untracked top-1000 coin is excluded from 'new opportunities'")
 
     # Redis
     REDIS_URL: str = Field(default="redis://localhost:6379/0", description="Redis connection URL for queue/cache")

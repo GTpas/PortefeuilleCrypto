@@ -33,31 +33,38 @@ from typing import Optional
 # Tunable constants (centralized so the formula is auditable in one place)
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Final Opportunity Score weights (sum = 1.0). Mirror the spec, adapted to the
-# data we actually have (Binance 24h ticker + macro backdrop).
+# Final Opportunity Score weights (sum = 1.0) + a risk penalty, per the
+# decision-support spec: opportunity = 25% momentum + 20% trend + 15% volume
+# + 15% relative strength + 10% liquidity + 10% market regime − 5% risk penalty.
 OPP_W_MOMENTUM = 0.25
-OPP_W_VOLUME = 0.20
-OPP_W_LIQUIDITY = 0.20
+OPP_W_TREND_QUALITY = 0.20
+OPP_W_VOLUME = 0.15
 OPP_W_REL_STRENGTH = 0.15
-OPP_W_TREND_QUALITY = 0.10
-OPP_W_MARKET_CTX = 0.05
-OPP_W_CONFIDENCE = 0.05
+OPP_W_LIQUIDITY = 0.10
+OPP_W_MARKET_CTX = 0.10
+OPP_W_RISK_PENALTY = 0.05       # subtracted, scaled by risk_score/100
 
-# Risk Score weights (sum = 1.0).
+# Risk Score weights (sum = 1.0). NOTE: the spec's "concentration_risk" needs
+# holder/whale data we do not have (real-data-only rule) — its slot is taken by
+# microstructure/spread risk, the closest real proxy of manipulability.
 RISK_W_VOLATILITY = 0.30
 RISK_W_DRAWDOWN = 0.25
-RISK_W_SPREAD = 0.15
 RISK_W_ILLIQUIDITY = 0.20
-RISK_W_MISSING = 0.10
+RISK_W_DATA_QUALITY = 0.15      # missing fields + staleness
+RISK_W_MICROSTRUCTURE = 0.10    # spread width (manipulability proxy)
 
 # Signal thresholds (documented in docs/daily_crypto_report.md).
 BUY_OPP_MIN = 75.0
-BUY_RISK_MAX = 45.0
+BUY_RISK_MAX = 60.0
 BUY_CONF_MIN = 65.0
+BUY_MOMENTUM_MIN = 0.50         # momentum must be positive to BUY
+BUY_LIQUIDITY_MIN = 0.35        # enough liquidity to enter/exit cleanly
 AVOID_LIQUIDITY_MAX = 0.25      # liquidity_ratio below → too illiquid to trust
 AVOID_SPREAD_BPS = 60.0         # spread wider than this → fragile / manipulable
 AVOID_CONF_MIN = 35.0           # confidence below → not enough real data
 AVOID_RISK_MIN = 80.0           # risk at/above → avoid regardless
+PUMP_CHANGE_PCT = 18.0          # |24h move| beyond this needs volume support…
+PUMP_SUPPORT_MAX = 0.35         # …otherwise it looks like a thin pump → AVOID
 SELL_CHANGE_MAX = -3.0          # 24h change at/below (%) is part of a SELL
 SELL_MOMENTUM_MAX = 0.40        # momentum_ratio below → downward
 SELL_RISK_MIN = 55.0            # combined with negative momentum → SELL
@@ -337,11 +344,16 @@ class AssetScores:
     volatility_ratio: float
     drawdown_ratio: float
     market_context_score: float
-    components: dict = field(default_factory=dict)  # opportunity sub-weights
+    components: dict = field(default_factory=dict)       # opportunity sub-weights
+    risk_components: dict = field(default_factory=dict)  # risk sub-weights
 
 
 def opportunity_score(a: AssetInput, ctx: MarketContext) -> AssetScores:
-    """Compute every ratio + the final opportunity/risk/confidence scores."""
+    """Compute every ratio + the final opportunity/risk/confidence scores.
+
+    Risk is computed first because the opportunity formula subtracts a risk
+    penalty (OPP_W_RISK_PENALTY · risk/100), per the decision-support spec.
+    """
     mom = momentum_ratio(a)
     volc = volume_confirmation_ratio(a)
     liq = liquidity_ratio(a)
@@ -353,31 +365,31 @@ def opportunity_score(a: AssetInput, ctx: MarketContext) -> AssetScores:
     mkt = market_context_score(ctx)
     conf = confidence_score(a)
 
+    data_quality_risk = clamp(0.7 * (1.0 - completeness(a)) + (0.3 if a.stale else 0.0))
+    risk_components = {
+        "volatility": round(RISK_W_VOLATILITY * vol, 4),
+        "drawdown": round(RISK_W_DRAWDOWN * dd, 4),
+        "illiquidity": round(RISK_W_ILLIQUIDITY * (1.0 - liq), 4),
+        "data_quality": round(RISK_W_DATA_QUALITY * data_quality_risk, 4),
+        "microstructure": round(RISK_W_MICROSTRUCTURE * _spread_risk(a), 4),
+    }
+    risk = 100.0 * clamp(sum(risk_components.values()))
+
     # Missing ratio → neutral 0.5 in the blend (never a fabricated extreme).
     c_mom = mom if mom is not None else 0.5
     c_volc = volc if volc is not None else 0.5
     c_tq = tq if tq is not None else 0.5
-    c_conf = conf / 100.0
 
     components = {
         "momentum": round(OPP_W_MOMENTUM * c_mom, 4),
-        "volume_confirmation": round(OPP_W_VOLUME * c_volc, 4),
-        "liquidity": round(OPP_W_LIQUIDITY * liq, 4),
-        "relative_strength": round(OPP_W_REL_STRENGTH * rs_norm, 4),
         "trend_quality": round(OPP_W_TREND_QUALITY * c_tq, 4),
+        "volume_confirmation": round(OPP_W_VOLUME * c_volc, 4),
+        "relative_strength": round(OPP_W_REL_STRENGTH * rs_norm, 4),
+        "liquidity": round(OPP_W_LIQUIDITY * liq, 4),
         "market_context": round(OPP_W_MARKET_CTX * mkt, 4),
-        "source_confidence": round(OPP_W_CONFIDENCE * c_conf, 4),
+        "risk_penalty": round(-OPP_W_RISK_PENALTY * (risk / 100.0), 4),
     }
-    opp = 100.0 * sum(components.values())
-
-    missing_penalty = 1.0 - completeness(a)
-    risk = 100.0 * clamp(
-        RISK_W_VOLATILITY * vol
-        + RISK_W_DRAWDOWN * dd
-        + RISK_W_SPREAD * _spread_risk(a)
-        + RISK_W_ILLIQUIDITY * (1.0 - liq)
-        + RISK_W_MISSING * missing_penalty
-    )
+    opp = 100.0 * clamp(sum(components.values()))
 
     return AssetScores(
         opportunity_score=round(opp, 1),
@@ -387,8 +399,29 @@ def opportunity_score(a: AssetInput, ctx: MarketContext) -> AssetScores:
         liquidity_ratio=round(liq, 4), relative_strength_btc=_r(rs, 4),
         trend_quality_ratio=_r(tq), volatility_ratio=round(vol, 4),
         drawdown_ratio=round(dd, 4), market_context_score=round(mkt, 4),
-        components=components,
+        components=components, risk_components=risk_components,
     )
+
+
+def sub_scores(s: AssetScores) -> dict:
+    """Every sub-score on a 0–100 scale (None preserved when the underlying
+    ratio is genuinely unavailable). Single source for the report's per-asset
+    score block — the UI never recomputes numbers."""
+    def pct(x: Optional[float]) -> Optional[float]:
+        return None if x is None else round(100.0 * clamp(x), 1)
+    return {
+        "momentum_score": pct(s.momentum_ratio),
+        "trend_score": pct(s.trend_quality_ratio),
+        "volume_score": pct(s.volume_confirmation_ratio),
+        "liquidity_score": pct(s.liquidity_ratio),
+        "volatility_score": pct(s.volatility_ratio),
+        "drawdown_score": pct(s.drawdown_ratio),
+        "relative_strength_score": pct(_rel_strength_norm(s.relative_strength_btc)),
+        "market_regime_score": pct(s.market_context_score),
+        "risk_score": round(s.risk_score, 1),
+        "opportunity_score": round(s.opportunity_score, 1),
+        "confidence_score": round(s.confidence_score, 1),
+    }
 
 
 def _spread_risk(a: AssetInput) -> float:
@@ -462,21 +495,78 @@ def signal(a: AssetInput, s: AssetScores) -> str:
     quality), then BUY, then SELL, else HOLD."""
     liq = s.liquidity_ratio
     sp = _finite(a.spread_bps)
+    chg = _finite(a.change_24h)
+    mom = s.momentum_ratio if s.momentum_ratio is not None else 0.5
+    volc = s.volume_confirmation_ratio if s.volume_confirmation_ratio is not None else 0.5
     # AVOID: not enough real data / too illiquid / too risky to act on.
     if (a.stale or liq < AVOID_LIQUIDITY_MAX or s.confidence_score < AVOID_CONF_MIN
             or s.risk_score >= AVOID_RISK_MIN or (sp is not None and sp > AVOID_SPREAD_BPS)):
         return "AVOID"
-    # BUY: strong opportunity, contained risk, enough confidence.
+    # AVOID (pump suspect): extreme 24h move without volume/VWAP support.
+    if chg is not None and abs(chg) >= PUMP_CHANGE_PCT and volc < PUMP_SUPPORT_MAX:
+        return "AVOID"
+    # BUY: strong opportunity, contained risk, enough confidence, positive
+    # momentum and sufficient liquidity (decision-support spec).
     if (s.opportunity_score >= BUY_OPP_MIN and s.risk_score <= BUY_RISK_MAX
-            and s.confidence_score >= BUY_CONF_MIN):
+            and s.confidence_score >= BUY_CONF_MIN and mom > BUY_MOMENTUM_MIN
+            and liq >= BUY_LIQUIDITY_MIN):
         return "BUY"
-    # SELL: clear downward momentum + elevated risk.
-    chg = _finite(a.change_24h)
-    mom = s.momentum_ratio if s.momentum_ratio is not None else 0.5
+    # SELL: clear downward momentum + (elevated risk or short-term trend break,
+    # i.e. price below its 24h VWAP — distribution).
+    below_vwap = (a.price is not None and a.vwap_24h is not None
+                  and _finite(a.vwap_24h) and a.price < a.vwap_24h)
     if (chg is not None and chg <= SELL_CHANGE_MAX and mom < SELL_MOMENTUM_MAX
-            and s.risk_score >= SELL_RISK_MIN):
+            and (s.risk_score >= SELL_RISK_MIN or (below_vwap and s.drawdown_ratio >= 0.5))):
         return "SELL"
     return "HOLD"
+
+
+def conviction(sig: str, s: AssetScores) -> str:
+    """Conviction level of the signal: forte | moyenne | faible.
+
+    Driven by confidence (data quality) and by how far the scores sit from the
+    decision thresholds — a BUY barely above the bar is a weak BUY."""
+    if s.confidence_score < 50:
+        return "faible"
+    if sig == "BUY":
+        margin = (s.opportunity_score - BUY_OPP_MIN) + (BUY_RISK_MAX - s.risk_score)
+        if margin >= 25 and s.confidence_score >= 75:
+            return "forte"
+        return "moyenne" if margin >= 8 else "faible"
+    if sig == "SELL":
+        mom = s.momentum_ratio if s.momentum_ratio is not None else 0.5
+        if s.risk_score >= 70 and mom <= 0.25 and s.confidence_score >= 65:
+            return "forte"
+        return "moyenne"
+    if sig == "AVOID":
+        return "forte" if (s.confidence_score < AVOID_CONF_MIN or s.risk_score >= AVOID_RISK_MIN) else "moyenne"
+    # HOLD: conviction is about how clearly neutral the situation is.
+    if 40 <= s.opportunity_score <= 65 and s.confidence_score >= 70:
+        return "moyenne"
+    return "faible"
+
+
+def contradictions(a: AssetInput, s: AssetScores) -> list[str]:
+    """Real contradictory signals worth disclosing next to a recommendation."""
+    out: list[str] = []
+    mom = s.momentum_ratio
+    volc = s.volume_confirmation_ratio
+    if mom is not None and volc is not None:
+        if mom >= 0.6 and volc < 0.45:
+            out.append("momentum positif mais volume peu confirmant")
+        if mom <= 0.4 and volc >= 0.6:
+            out.append("momentum négatif mais volume acheteur soutenu")
+    if mom is not None and mom >= 0.6 and s.risk_score >= 60:
+        out.append("tendance positive mais risque élevé")
+    rs = s.relative_strength_btc
+    if rs is not None and mom is not None:
+        if mom >= 0.6 and rs < 0.97:
+            out.append("hausse 24h mais sous-performance vs BTC")
+    if s.market_context_score < 0.4 and mom is not None and mom >= 0.6:
+        out.append("actif haussier dans un marché global défavorable")
+    if s.volatility_ratio >= 0.6 and s.liquidity_ratio < 0.5:
+        out.append("forte volatilité sur une liquidité moyenne/faible")
+    return out
 
 
 def horizon(a: AssetInput, s: AssetScores) -> str:

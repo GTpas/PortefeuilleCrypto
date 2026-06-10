@@ -280,91 +280,135 @@
         </div>
     </div>
 
-    <!-- DAILY REPORT MODAL (advisory report over the 300-crypto universe) -->
+    <!-- DAILY REPORT MODAL (decision-support report over the 300-crypto universe) -->
     <div id="report-modal" class="modal hidden" role="dialog" aria-modal="true" aria-label="Daily crypto report">
         <div class="modal-content report-content">
             <div class="modal-header">
                 <h2>📅 Rapport Crypto Quotidien</h2>
                 <div class="ops-header-right">
                     <span id="report-status" class="status-badge disconnected" title="Date + régime de marché du dernier rapport">—</span>
-                    <button id="report-generate" class="tool-btn" title="Générer maintenant (test/admin)">Générer</button>
+                    <button id="report-generate" class="tool-btn" title="Régénérer le rapport maintenant">Générer</button>
                     <button id="close-report" class="close-btn" aria-label="Close">&times;</button>
                 </div>
             </div>
             <div class="modal-body report-body">
-                <div id="report-disclaimer" class="report-disclaimer">
-                    ⚠️ Analyse indicative et pédagogique. <strong>Ce n'est pas un conseil financier personnalisé.</strong>
-                    Les prédictions sont des probabilités/scénarios, jamais des certitudes.
+                <div id="report-kind" class="report-kind">
+                    Rapport d'aide à la décision financière — <strong>recommandations générées par modèle quantitatif</strong>,
+                    à partir de données de marché réelles.
                 </div>
 
-                <!-- Executive summary KPIs -->
-                <div id="report-kpis" class="report-kpis"></div>
-                <div id="report-summary" class="report-summary"></div>
+                <div class="report-tabs" id="report-tabs" role="tablist" aria-label="Sections du rapport">
+                    <button data-tab="synthese" class="active" role="tab">Synthèse</button>
+                    <button data-tab="portefeuille" role="tab">Portefeuille</button>
+                    <button data-tab="opportunites" role="tab">Opportunités</button>
+                    <button data-tab="risques" role="tab">Risques</button>
+                    <button data-tab="classement" role="tab">Classement</button>
+                    <button data-tab="sources" role="tab">Sources</button>
+                    <button data-tab="historique" role="tab">Historique</button>
+                </div>
 
-                <!-- Rating distribution -->
-                <div class="report-section-title">Distribution des ratings</div>
-                <div id="report-ratings" class="report-ratings"></div>
+                <div id="report-empty" class="report-empty hidden"></div>
 
-                <!-- Top lists -->
-                <div class="report-tops">
-                    <div class="report-top-col">
-                        <div class="report-section-title">Top BUY</div>
-                        <div id="report-top-buy" class="report-top-list"></div>
+                <!-- SYNTHÈSE -->
+                <div id="report-tab-synthese" class="report-pane">
+                    <div id="report-posture" class="report-posture"></div>
+                    <div id="report-kpis" class="report-kpis"></div>
+                    <div id="report-summary" class="report-summary"></div>
+                    <div class="report-grid-2">
+                        <div>
+                            <div class="report-section-title">Distribution des signaux</div>
+                            <div id="report-sigbar" class="report-bars"></div>
+                        </div>
+                        <div>
+                            <div class="report-section-title">Distribution des ratings</div>
+                            <div id="report-ratings" class="report-bars"></div>
+                        </div>
                     </div>
-                    <div class="report-top-col">
-                        <div class="report-section-title">Top SELL</div>
-                        <div id="report-top-sell" class="report-top-list"></div>
+                    <div class="report-section-title">Top actions du jour</div>
+                    <div id="report-top-actions" class="report-actions-list"></div>
+                    <div id="report-changes-mini"></div>
+                </div>
+
+                <!-- PORTEFEUILLE -->
+                <div id="report-tab-portefeuille" class="report-pane hidden">
+                    <div id="report-portfolio"></div>
+                </div>
+
+                <!-- OPPORTUNITÉS -->
+                <div id="report-tab-opportunites" class="report-pane hidden">
+                    <div class="report-section-title">Recommandations d'achat (BUY)</div>
+                    <div id="report-opps"></div>
+                    <div class="report-section-title">Top 1000 externe — opportunités hors univers</div>
+                    <div id="report-top1000"></div>
+                </div>
+
+                <!-- RISQUES -->
+                <div id="report-tab-risques" class="report-pane hidden">
+                    <div class="report-section-title">Allègements / ventes recommandés</div>
+                    <div id="report-sells"></div>
+                    <div class="report-section-title">Actifs à éviter</div>
+                    <div id="report-avoids"></div>
+                    <div class="report-section-title">Carte momentum × risque (univers)</div>
+                    <div id="report-heatmap" class="report-heatmap"></div>
+                </div>
+
+                <!-- CLASSEMENT -->
+                <div id="report-tab-classement" class="report-pane hidden">
+                    <div id="report-detail" class="report-detail hidden"></div>
+                    <div class="report-toolbar">
+                        <input id="report-search" type="text" autocomplete="off" spellcheck="false"
+                               placeholder="Rechercher un symbole…" aria-label="Rechercher un symbole">
+                        <div class="report-filters" id="report-signal-filters" role="group" aria-label="Filtre signal">
+                            <button data-sig="ALL" class="active">Tous</button>
+                            <button data-sig="BUY">BUY</button>
+                            <button data-sig="HOLD">HOLD</button>
+                            <button data-sig="SELL">SELL</button>
+                            <button data-sig="AVOID">AVOID</button>
+                        </div>
+                        <select id="report-rating-filter" aria-label="Filtre rating">
+                            <option value="ALL">Tous ratings</option>
+                            <option value="A+">A+</option><option value="A">A</option>
+                            <option value="B">B</option><option value="C">C</option>
+                            <option value="D">D</option><option value="E">E</option>
+                        </select>
+                        <select id="report-sort" aria-label="Trier par">
+                            <option value="opportunity_score">Tri : Opportunité</option>
+                            <option value="risk_score">Tri : Risque</option>
+                            <option value="quote_volume_24h">Tri : Volume</option>
+                            <option value="momentum">Tri : Momentum</option>
+                            <option value="confidence_score">Tri : Confiance</option>
+                            <option value="rank">Tri : Rang</option>
+                        </select>
+                        <span id="report-count" class="report-count">—</span>
                     </div>
-                    <div class="report-top-col">
-                        <div class="report-section-title">À surveiller</div>
-                        <div id="report-top-watch" class="report-top-list"></div>
+                    <div class="report-table-wrap">
+                        <table class="report-table">
+                            <thead>
+                                <tr><th>#</th><th>Symbole</th><th>Prix</th><th>24h</th><th>Volume</th>
+                                    <th>Signal</th><th>Action</th><th>Conv.</th><th>Rating</th>
+                                    <th>Opp.</th><th>Risque</th><th>Conf.</th></tr>
+                            </thead>
+                            <tbody id="report-rows"></tbody>
+                        </table>
                     </div>
                 </div>
 
-                <!-- Detail panel (shown when a row is selected) -->
-                <div id="report-detail" class="report-detail hidden"></div>
+                <!-- SOURCES -->
+                <div id="report-tab-sources" class="report-pane hidden">
+                    <div id="report-dataquality"></div>
+                </div>
 
-                <!-- Filters + ranking table -->
-                <div class="report-section-title">Classement des cryptos</div>
-                <div class="report-toolbar">
-                    <input id="report-search" type="text" autocomplete="off" spellcheck="false"
-                           placeholder="Rechercher un symbole…" aria-label="Rechercher un symbole">
-                    <div class="report-filters" id="report-signal-filters" role="group" aria-label="Filtre signal">
-                        <button data-sig="ALL" class="active">Tous</button>
-                        <button data-sig="BUY">BUY</button>
-                        <button data-sig="HOLD">HOLD</button>
-                        <button data-sig="SELL">SELL</button>
-                        <button data-sig="AVOID">AVOID</button>
-                    </div>
-                    <select id="report-rating-filter" aria-label="Filtre rating">
-                        <option value="ALL">Tous ratings</option>
-                        <option value="A+">A+</option><option value="A">A</option>
-                        <option value="B">B</option><option value="C">C</option>
-                        <option value="D">D</option><option value="E">E</option>
-                    </select>
-                    <select id="report-sort" aria-label="Trier par">
-                        <option value="opportunity_score">Tri : Opportunité</option>
-                        <option value="risk_score">Tri : Risque</option>
-                        <option value="quote_volume_24h">Tri : Volume</option>
-                        <option value="momentum">Tri : Momentum</option>
-                        <option value="confidence_score">Tri : Confiance</option>
-                        <option value="rank">Tri : Rang</option>
-                    </select>
-                    <span id="report-count" class="report-count">—</span>
+                <!-- HISTORIQUE -->
+                <div id="report-tab-historique" class="report-pane hidden">
+                    <div id="report-changes"></div>
+                    <div class="report-section-title">Rapports précédents</div>
+                    <div id="report-history"></div>
                 </div>
-                <div class="report-table-wrap">
-                    <table class="report-table">
-                        <thead>
-                            <tr><th>#</th><th>Symbole</th><th>Prix</th><th>24h</th><th>Volume</th>
-                                <th>Signal</th><th>Rating</th><th>Opp.</th><th>Risque</th><th>Conf.</th><th>Horizon</th></tr>
-                        </thead>
-                        <tbody id="report-rows"></tbody>
-                    </table>
-                </div>
-                <div class="live-debug-hint">
-                    Source : univers <code>Binance Spot</code> (ticker 24h réel) + contexte macro.
-                    Horizons <code>1h/7j/30j</code> et <code>market cap</code> non fournis → <code>N/A</code>.
-                    Génération auto chaque jour ; relance manuelle via « Générer ».
+
+                <div class="live-debug-hint" id="report-disclaimer">
+                    Les crypto-actifs sont volatils ; les recommandations dépendent des données disponibles au moment de la
+                    génération et sont exprimées en scénarios probabilistes. Génération automatique chaque jour à minuit ;
+                    relance manuelle via « Générer ».
                 </div>
             </div>
         </div>

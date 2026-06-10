@@ -107,20 +107,24 @@ Pousse l'état live du symbole, throttlé à `BROADCAST_THROTTLE_MS` (500 ms).
 
 > Ops API/WS (`:8050`, `/api/ops/*`, `/ws/ops`) est servie par le **supervisor**, pas par cette API — voir [DEPLOYMENT.md](DEPLOYMENT.md#supervisor).
 
-## Rapport conseil quotidien (advisory tier — `reports/`)
+## Rapport quotidien d'aide à la décision (advisory tier — `reports/`)
 
-Rapport quotidien sur les ~300 cryptos (réel uniquement, prédictions prudentes). Détail : [daily_crypto_report.md](daily_crypto_report.md). Fichiers `reports/*.json|.md` = source de vérité ; index DB best-effort.
+Rapport d'aide à la décision financière (modèle quantitatif) sur les ~300 cryptos + watchlist top 1000 CoinGecko (réel uniquement, scénarios probabilistes). Détail : [daily_crypto_report.md](daily_crypto_report.md). Fichiers `reports/*.json|.md` = source de vérité ; index DB best-effort.
 
 | Méthode / Route | Rôle |
 |---|---|
-| `GET /api/reports/daily/latest` | Dernier rapport généré (JSON complet) ; `{available:false}` si aucun |
+| `GET /api/reports/daily/latest` | Dernier rapport généré (JSON complet, schema v2) ; `{available:false}` si aucun |
 | `GET /api/reports/daily/{date}` | Rapport d'une date `YYYY-MM-DD` (`{available:false}` si absent/format invalide) |
 | `GET /api/reports/daily/history?limit=` | Liste des rapports (récent → ancien, lignes d'index slim) |
-| `POST /api/reports/daily/generate` | Génère **maintenant** depuis les hubs in-process (test/admin) → résumé slim |
+| `POST /api/reports/daily/generate` | Génère **maintenant** depuis les hubs in-process (bouton « Générer ») → résumé slim |
 | `GET /api/reports/daily/latest/assets/{symbol}` | Analyse détaillée d'une crypto du dernier rapport |
+| `GET /api/reports/daily/{date}/crypto/{symbol}` | Analyse détaillée d'une crypto pour une date (`latest` accepté) |
+| `GET /api/reports/opportunities/top1000` | Watchlist externe top 1000 CoinGecko du dernier rapport (statuts `ok/partial/unavailable/disabled`) |
+| `GET /api/reports/portfolio/model` | Bloc portefeuille modèle (posture, allocations par profil, poids par symbole) |
 
 - `GET /api/binance/config` expose `daily_report_enabled` ; `GET /api/health` ajoute un bloc `daily_report` (dernière date + statut).
-- Real-data-only : horizons `1h/7j/30j` et `market_cap` renvoyés `null` (N/A) ; `signal ∈ {BUY,HOLD,SELL,AVOID}` ; `prediction.up_probability ∈ [0.15, 0.85]` (jamais une certitude).
+- **Schema v2** par rapport : `executive_summary` (posture, conviction globale, confiance modèle), `portfolio_models` (allocations prudent/équilibré/agressif), `watchlist_external`, `data_quality`, `changes_vs_previous` (diff vs rapport précédent). Par actif : `scores` (sous-scores 0–100), `conviction`, `action`, `rationale`, `contradictions`, `main_risk`, `invalidation_level`/`take_profit_zone`/`stop_loss_zone` (niveaux 24h réels uniquement), `recommended_weights`/`max_weight` (par profil), `source_evidence` horodatée (`as_of_ms`/`age_ms` + raison FR quand indisponible).
+- Real-data-only : horizons `1h/7j/30j` et `market_cap` univers renvoyés `null` avec raison explicite ; `signal ∈ {BUY,HOLD,SELL,AVOID}` ; `prediction.up_probability ∈ [0.15, 0.85]` (jamais une certitude).
 
 ## Ajouter un endpoint (checklist)
 1. Implémenter dans `api/main.py` (gérer l'erreur, pinner `DISPLAY_EXCHANGE` si lecture DB d'affichage).

@@ -23,6 +23,7 @@ from market.global_context import GlobalContextHub
 from market.defi import DefiHub
 from api.decision_evidence import assemble_source_evidence
 from reports import generator as report_generator, store as report_store_mod
+from reports import top1000 as report_top1000
 from reports.store import ReportStore
 
 logger = logging.getLogger("api")
@@ -1177,9 +1178,32 @@ async def _generate_report_inprocess(trigger: str = "manual") -> dict:
     rows = universe_hub.universe(settings.DAILY_REPORT_UNIVERSE_LIMIT) if universe_hub else []
     global_ctx = global_hub.snapshot() if global_hub else None
     now_local = datetime.now(timezone.utc).astimezone(_report_tz())
+
+    # Previous report (for the day-over-day diff): the most recent date strictly
+    # before today, so a manual regeneration never diffs a report against itself.
+    rstore = _report_store()
+    today = now_local.date().isoformat()
+    prev_date = next((d for d in rstore.dates() if d < today), None)
+    previous = rstore.load(prev_date) if prev_date else None
+
+    # External top-1000 watchlist (CoinGecko, best-effort, never blocks the report).
+    universe_bases = {(r.get("base") or "").upper() for r in rows if r.get("base")}
+    try:
+        watchlist = await asyncio.to_thread(
+            report_top1000.build_external_watchlist,
+            settings.COINGECKO_API_BASE, universe_bases,
+            enabled=settings.ENABLE_TOP1000_WATCHLIST,
+            min_volume_usd=settings.TOP1000_MIN_VOLUME_USD,
+            pages=settings.TOP1000_PAGES,
+            timeout=settings.GLOBAL_CONTEXT_HTTP_TIMEOUT,
+            api_key=settings.COINGECKO_API_KEY)
+    except Exception as e:  # pragma: no cover - defensive
+        watchlist = {"status": "unavailable", "source": "coingecko", "error": str(e)}
+
     report = report_generator.build_daily_report(
         rows, global_ctx, generated_at=datetime.now(timezone.utc).isoformat(),
-        report_date=now_local.date().isoformat(), top_n=settings.DAILY_REPORT_TOP_N)
+        report_date=now_local.date().isoformat(), top_n=settings.DAILY_REPORT_TOP_N,
+        previous_report=previous, external_watchlist=watchlist)
     report["status"] = "ok" if rows else "error"
     if not rows:
         report["error_message"] = "universe hub unavailable (no real rows)"
@@ -1276,6 +1300,59 @@ async def get_report_by_date(date: str):
     if not rep:
         return {"available": False, "reason": "report_not_found", "report_date": date}
     return {"available": True, **rep}
+
+
+@app.get("/api/reports/daily/{date}/crypto/{symbol:path}")
+async def get_report_asset_by_date(date: str, symbol: str):
+    """Detailed recommendation for one crypto in the report of a given date
+    (``latest`` accepted as date alias)."""
+    store = _report_store()
+    if date == "latest":
+        rep = store.latest()
+    elif not _DATE_RE_API.match(date or ""):
+        return {"available": False, "reason": "invalid_date_format", "expected": "YYYY-MM-DD"}
+    else:
+        rep = store.load(date)
+    if not rep:
+        return {"available": False, "reason": "report_not_found", "report_date": date, "symbol": symbol}
+    for a in rep.get("assets", []):
+        if a.get("symbol") == symbol or a.get("base") == symbol:
+            return {"available": True, "report_date": rep.get("report_date"),
+                    "generated_at": rep.get("generated_at"), "asset": a}
+    return {"available": False, "reason": "symbol_not_in_report", "symbol": symbol,
+            "report_date": date}
+
+
+@app.get("/api/reports/opportunities/top1000")
+async def get_report_top1000():
+    """External top-1000 watchlist block of the latest report (CoinGecko).
+    Honest statuses: disabled / unavailable / partial / ok."""
+    store = _report_store()
+    rep = store.latest()
+    if not rep:
+        return {"available": False, "reason": "no_report_generated_yet",
+                "enabled": bool(settings.ENABLE_TOP1000_WATCHLIST)}
+    wl = rep.get("watchlist_external") or {"status": "unavailable",
+                                           "reason": "rapport antérieur au tier watchlist externe"}
+    return {"available": True, "report_date": rep.get("report_date"),
+            "generated_at": rep.get("generated_at"), "watchlist": wl}
+
+
+@app.get("/api/reports/portfolio/model")
+async def get_report_portfolio_model():
+    """Model-portfolio block of the latest report (posture, allocations per
+    profile, per-symbol recommended weights)."""
+    store = _report_store()
+    rep = store.latest()
+    if not rep:
+        return {"available": False, "reason": "no_report_generated_yet"}
+    pf = rep.get("portfolio_models")
+    if not pf:
+        return {"available": False, "reason": "rapport antérieur au tier portefeuille",
+                "report_date": rep.get("report_date")}
+    return {"available": True, "report_date": rep.get("report_date"),
+            "generated_at": rep.get("generated_at"), "portfolio_models": pf,
+            "disclaimer": rep.get("disclaimer")}
 
 
 # ── Historical OHLCV ───────────────────────

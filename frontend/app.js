@@ -1892,12 +1892,14 @@ async function fetchDefi() {
     }).join('');
 }
 
-// ── Daily Crypto Intelligence Report (advisory tier — real data only) ─────────
-// Beginner-readable advisory over the ~300-crypto universe. Predictions are shown
-// as probabilities/scenarios (never certainties); unavailable inputs render N/A.
+// ── Daily Crypto Report (decision-support tier — real data only) ──────────────
+// Quant-model decision-support report over the ~300-crypto universe: posture,
+// model portfolios, per-asset actions, source evidence. Predictions stay
+// probabilistic; an unavailable input renders "Donnée indisponible" + reason,
+// never a fabricated value.
 const reportState = {
-    report: null, filterSig: 'ALL', filterRating: 'ALL',
-    sort: 'opportunity_score', search: '', selected: null,
+    report: null, history: [], filterSig: 'ALL', filterRating: 'ALL',
+    sort: 'opportunity_score', search: '', selected: null, tab: 'synthese',
 };
 
 function sigClass(sig) {
@@ -1907,6 +1909,12 @@ function ratingClass(r) {
     return 'rating-badge ' + ({ 'A+': 'r-aplus', 'A': 'r-a', 'B': 'r-b', 'C': 'r-c', 'D': 'r-d', 'E': 'r-e' })[r] || 'rating-badge';
 }
 const REGIME_FR = { bullish: 'Haussier', neutral: 'Neutre', bearish: 'Baissier' };
+const CONV_FR = { forte: 'forte', moyenne: 'moyenne', faible: 'faible' };
+
+// Honest placeholder for a missing input: explicit label + reason on hover.
+function unavail(reason) {
+    return `<span class="report-unavail" title="${escapeHtml(reason || 'donnée non fournie par la source')}">Donnée indisponible</span>`;
+}
 
 function setupDailyReport() {
     const modal = document.getElementById('report-modal');
@@ -1919,6 +1927,9 @@ function setupDailyReport() {
 
     const gen = document.getElementById('report-generate');
     if (gen) gen.addEventListener('click', generateDailyReport);
+
+    const tabs = document.getElementById('report-tabs');
+    if (tabs) tabs.querySelectorAll('button').forEach(b => b.addEventListener('click', () => switchReportTab(b.dataset.tab)));
 
     const search = document.getElementById('report-search');
     if (search) search.addEventListener('input', debounce((e) => {
@@ -1934,6 +1945,16 @@ function setupDailyReport() {
     if (ratingSel) ratingSel.addEventListener('change', (e) => { reportState.filterRating = e.target.value; renderReportTable(); });
     const sortSel = document.getElementById('report-sort');
     if (sortSel) sortSel.addEventListener('change', (e) => { reportState.sort = e.target.value; renderReportTable(); });
+}
+
+function switchReportTab(tab) {
+    reportState.tab = tab;
+    const tabs = document.getElementById('report-tabs');
+    if (tabs) tabs.querySelectorAll('button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+    ['synthese', 'portefeuille', 'opportunites', 'risques', 'classement', 'sources', 'historique'].forEach(t => {
+        const pane = document.getElementById(`report-tab-${t}`);
+        if (pane) pane.classList.toggle('hidden', t !== tab);
+    });
 }
 
 async function generateDailyReport() {
@@ -1957,16 +1978,34 @@ async function fetchDailyReport() {
         if (status) { status.textContent = 'indisponible'; status.className = 'status-badge disconnected'; }
         return;
     }
+    const emptyEl = document.getElementById('report-empty');
     if (!rep || rep.available === false) {
         reportState.report = null;
         if (status) { status.textContent = rep && rep.enabled === false ? 'désactivé' : 'aucun rapport'; status.className = 'status-badge disconnected'; }
-        const kpis = document.getElementById('report-kpis');
-        if (kpis) kpis.innerHTML = `<div class="report-empty">Aucun rapport généré pour le moment. Cliquez « Générer » pour en créer un.</div>`;
-        ['report-ratings', 'report-top-buy', 'report-top-sell', 'report-top-watch', 'report-rows', 'report-summary'].forEach(id => { const el = document.getElementById(id); if (el) el.innerHTML = ''; });
+        if (emptyEl) {
+            emptyEl.classList.remove('hidden');
+            emptyEl.textContent = 'Aucun rapport généré pour le moment. Cliquez « Générer » pour en créer un.';
+        }
+        ['report-posture', 'report-kpis', 'report-summary', 'report-sigbar', 'report-ratings',
+         'report-top-actions', 'report-changes-mini', 'report-portfolio', 'report-opps',
+         'report-top1000', 'report-sells', 'report-avoids', 'report-heatmap', 'report-rows',
+         'report-dataquality', 'report-changes', 'report-history']
+            .forEach(id => { const el = document.getElementById(id); if (el) el.innerHTML = ''; });
         return;
     }
+    if (emptyEl) emptyEl.classList.add('hidden');
     reportState.report = rep;
     renderReport(rep);
+    fetchReportHistory();   // async, fills the Historique tab when it lands
+}
+
+async function fetchReportHistory() {
+    try {
+        const res = await fetch(`${API_URL}/reports/daily/history`);
+        const out = await res.json();
+        reportState.history = Array.isArray(out.reports) ? out.reports.slice(0, 60) : [];
+    } catch (e) { reportState.history = []; }
+    renderReportHistory();
 }
 
 function renderReport(rep) {
@@ -1976,56 +2015,362 @@ function renderReport(rep) {
         status.textContent = `${rep.report_date || ''} · ${regime}`;
         status.className = `status-badge ${rep.status === 'error' ? 'disconnected' : 'connected'}`;
     }
+    renderReportSynthese(rep);
+    renderReportPortfolio(rep);
+    renderReportOpportunites(rep);
+    renderReportRisques(rep);
+    renderReportTable();
+    renderReportSources(rep);
+    renderReportChanges(rep);
+}
+
+function kpiCard(label, value, cls, title) {
+    return `<div class="report-kpi" ${title ? `title="${escapeHtml(title)}"` : ''}><span class="rk-label">${escapeHtml(label)}</span>
+        <span class="rk-value ${cls || ''}">${typeof value === 'string' && value.startsWith('<') ? value : escapeHtml(String(value))}</span></div>`;
+}
+
+// Horizontal bar (count / total) used by the distribution charts.
+function barRow(label, count, total, cls, title) {
+    const pct = total > 0 ? Math.round((count / total) * 100) : 0;
+    return `<div class="report-bar-row" title="${escapeHtml(title || `${label} : ${count} (${pct}%)`)}">
+        <span class="rb-label">${escapeHtml(label)}</span>
+        <span class="rb-track"><span class="rb-fill ${cls || ''}" style="width:${Math.max(pct, count > 0 ? 2 : 0)}%"></span></span>
+        <span class="rb-count">${count}</span></div>`;
+}
+
+// ── Synthèse ──────────────────────────────────────────────────────────────────
+function renderReportSynthese(rep) {
+    const ex = rep.executive_summary || {};
+    const pf = rep.portfolio_models || {};
     const mc = rep.market_context || {};
     const c = rep.signal_counts || {};
+    const total = rep.universe_size || 0;
+
+    const posture = document.getElementById('report-posture');
+    if (posture) {
+        posture.innerHTML = `
+            <div class="rp-main">
+                <div class="rp-block">
+                    <span class="rp-label">Positionnement recommandé</span>
+                    <span class="rp-value">${escapeHtml(ex.posture_label || pf.posture_label || '—')}</span>
+                </div>
+                <div class="rp-block">
+                    <span class="rp-label">Conviction du modèle</span>
+                    <span class="rp-value rp-conv-${escapeHtml(ex.global_conviction || 'faible')}">${escapeHtml(ex.global_conviction || '—')}</span>
+                </div>
+                <div class="rp-block">
+                    <span class="rp-label">Régime de marché</span>
+                    <span class="rp-value">${escapeHtml(REGIME_FR[ex.regime] || ex.regime_label || '—')}</span>
+                </div>
+                <div class="rp-block">
+                    <span class="rp-label">Confiance moyenne</span>
+                    <span class="rp-value">${ex.model_confidence != null ? Math.round(ex.model_confidence) + '/100' : unavail('confiance non calculée (univers vide)')}</span>
+                </div>
+            </div>
+            <p class="rp-justif">${escapeHtml(pf.posture_justification || '')}</p>`;
+    }
+
     const kpis = document.getElementById('report-kpis');
     if (kpis) {
         kpis.innerHTML = [
-            kpiCard('Régime', REGIME_FR[rep.market_regime] || '—'),
-            kpiCard('Univers', `${rep.universe_size || 0} cryptos`),
+            kpiCard('Univers', `${total} cryptos`),
             kpiCard('BUY', c.BUY || 0, 'sig-buy'),
             kpiCard('HOLD', c.HOLD || 0, 'sig-hold'),
             kpiCard('SELL', c.SELL || 0, 'sig-sell'),
             kpiCard('AVOID', c.AVOID || 0, 'sig-avoid'),
-            kpiCard('Largeur', mc.breadth_pct != null ? Math.round(mc.breadth_pct * 100) + '%' : 'n/a'),
-            kpiCard('Fear&Greed', mc.fear_greed != null ? Math.round(mc.fear_greed) : 'n/a'),
+            kpiCard('Largeur', mc.breadth_pct != null ? Math.round(mc.breadth_pct * 100) + '%' : unavail('largeur de marché non calculable (pas de variations 24h)'), '', '% de cryptos en hausse sur 24h'),
+            kpiCard('Fear&Greed', mc.fear_greed != null ? Math.round(mc.fear_greed) : unavail('source alternative.me non répondue')),
+            kpiCard('Généré', (rep.generated_at || '').replace('T', ' ').slice(0, 16) || '—'),
         ].join('');
     }
-    const summary = document.getElementById('report-summary');
-    if (summary) summary.textContent = rep.summary || '';
 
-    // Rating distribution
+    const summary = document.getElementById('report-summary');
+    if (summary) summary.textContent = (rep.summary || '').replace(/\*\*/g, '');
+
+    const sigbar = document.getElementById('report-sigbar');
+    if (sigbar) {
+        sigbar.innerHTML = ['BUY', 'HOLD', 'SELL', 'AVOID']
+            .map(s => barRow(s, c[s] || 0, total, sigClass(s))).join('');
+    }
+
     const ratings = document.getElementById('report-ratings');
     if (ratings) {
         const dist = rep.rating_distribution || {};
         ratings.innerHTML = (rep.rating_scale || []).map(s =>
-            `<span class="report-rating-chip ${ratingClass(s.rating).replace('rating-badge ', '')}" title="${escapeHtml(s.definition)}">
-                <b>${escapeHtml(s.rating)}</b> ${dist[s.rating] || 0}</span>`).join('');
+            barRow(s.rating, dist[s.rating] || 0, total,
+                   ratingClass(s.rating).replace('rating-badge ', ''), s.definition)).join('');
     }
 
-    renderTopList('report-top-buy', rep.top_buy);
-    renderTopList('report-top-sell', rep.top_sell);
-    renderTopList('report-top-watch', rep.top_watchlist);
-    renderReportTable();
+    // Top actions of the day: strongest BUY + strongest SELL, with their action verbs.
+    const actions = document.getElementById('report-top-actions');
+    if (actions) {
+        const assets = rep.assets || [];
+        const buys = assets.filter(a => a.signal === 'BUY').slice(0, 4);
+        const sells = assets.filter(a => a.signal === 'SELL')
+            .sort((a, b) => (b.risk_score || 0) - (a.risk_score || 0)).slice(0, 3);
+        const items = [...buys, ...sells];
+        actions.innerHTML = items.length ? items.map(a => `
+            <div class="report-action-item" data-sym="${escapeHtml(a.symbol)}">
+                <span class="sig-badge ${sigClass(a.signal)}">${escapeHtml(a.action || a.signal)}</span>
+                <span class="ra-sym">${escapeHtml(a.symbol)}</span>
+                <span class="rating-badge ${ratingClass(a.rating).replace('rating-badge ', '')}">${escapeHtml(a.rating)}</span>
+                <span class="ra-conv">conviction ${escapeHtml(a.conviction || '?')}</span>
+                <span class="ra-just">${escapeHtml((a.rationale || a.justification || '').slice(0, 180))}</span>
+            </div>`).join('')
+            : `<div class="report-empty-sm">Aucune action franche aujourd'hui — le modèle recommande d'attendre une configuration plus claire.</div>`;
+        actions.querySelectorAll('.report-action-item').forEach(it =>
+            it.addEventListener('click', () => { switchReportTab('classement'); showAssetDetail(it.dataset.sym); }));
+    }
+
+    const mini = document.getElementById('report-changes-mini');
+    if (mini) {
+        const ch = rep.changes_vs_previous;
+        if (ch && ((ch.signal_upgrades || []).length || (ch.signal_downgrades || []).length)) {
+            const ups = (ch.signal_upgrades || []).slice(0, 4).map(x => `${x.symbol} ${x.from}→${x.to}`).join(', ');
+            const downs = (ch.signal_downgrades || []).slice(0, 4).map(x => `${x.symbol} ${x.from}→${x.to}`).join(', ');
+            mini.innerHTML = `<div class="report-changes-mini">Depuis le ${escapeHtml(ch.previous_report_date || '?')} —
+                ${ups ? `<span class="up">↑ ${escapeHtml(ups)}</span>` : ''}
+                ${downs ? `<span class="down">↓ ${escapeHtml(downs)}</span>` : ''}</div>`;
+        } else mini.innerHTML = '';
+    }
 }
 
-function kpiCard(label, value, cls) {
-    return `<div class="report-kpi"><span class="rk-label">${escapeHtml(label)}</span>
-        <span class="rk-value ${cls || ''}">${escapeHtml(String(value))}</span></div>`;
-}
+// ── Portefeuille ──────────────────────────────────────────────────────────────
+const BUCKET_ORDER = ['btc_eth', 'large_caps', 'mid_caps', 'small_caps', 'stables_cash', 'opportunistic'];
+const BUCKET_CLASS = { btc_eth: 'bk-core', large_caps: 'bk-large', mid_caps: 'bk-mid', small_caps: 'bk-small', stables_cash: 'bk-cash', opportunistic: 'bk-oppo' };
 
-function renderTopList(id, rows) {
-    const el = document.getElementById(id);
+function renderReportPortfolio(rep) {
+    const el = document.getElementById('report-portfolio');
     if (!el) return;
-    rows = Array.isArray(rows) ? rows : [];
-    if (!rows.length) { el.innerHTML = `<div class="report-empty-sm">—</div>`; return; }
-    el.innerHTML = rows.map(r =>
-        `<div class="report-top-item" data-sym="${escapeHtml(r.symbol)}">
-            <span class="rt-sym">${escapeHtml(r.symbol)}</span>
-            <span class="rating-badge ${ratingClass(r.rating).replace('rating-badge ', '')}">${escapeHtml(r.rating || '')}</span>
-            <span class="rt-chg ${chgClass(r.change_24h)}">${fmtPct(r.change_24h)}</span>
-        </div>`).join('');
-    el.querySelectorAll('.report-top-item').forEach(it => it.addEventListener('click', () => showAssetDetail(it.dataset.sym)));
+    const pf = rep.portfolio_models || {};
+    const profiles = pf.profiles || {};
+    const labels = pf.bucket_labels || {};
+    if (!Object.keys(profiles).length) {
+        el.innerHTML = `<div class="report-empty-sm">Portefeuille modèle indisponible — rapport antérieur à cette version ou univers vide. Cliquez « Générer ».</div>`;
+        return;
+    }
+    const weights = pf.weights_by_symbol || {};
+    const buySyms = Object.keys(weights);
+    const cards = Object.entries(profiles).map(([key, p]) => {
+        const alloc = p.allocation || {};
+        const segs = BUCKET_ORDER.filter(b => (alloc[b] || 0) > 0).map(b =>
+            `<span class="alloc-seg ${BUCKET_CLASS[b]}" style="width:${alloc[b]}%" title="${escapeHtml(labels[b] || b)} : ${alloc[b]}%"></span>`).join('');
+        const legend = BUCKET_ORDER.filter(b => (alloc[b] || 0) > 0).map(b =>
+            `<span class="alloc-leg"><span class="alloc-dot ${BUCKET_CLASS[b]}"></span>${escapeHtml(labels[b] || b)} <b>${alloc[b]}%</b></span>`).join('');
+        const top = buySyms
+            .map(s => ({ sym: s, w: (weights[s] || {})[key] || 0 }))
+            .filter(x => x.w > 0).sort((a, b) => b.w - a.w).slice(0, 6)
+            .map(x => `<span class="pw-item">${escapeHtml(x.sym)} <b>${x.w}%</b></span>`).join('');
+        return `
+            <div class="report-profile-card">
+                <div class="rpc-head"><span class="rpc-name">${escapeHtml(p.label || key)}</span>
+                    <span class="rpc-risk">risque ${escapeHtml(p.risk_level || '?')}</span></div>
+                <div class="alloc-bar">${segs}</div>
+                <div class="alloc-legend">${legend}</div>
+                <div class="rpc-meta">
+                    <span title="Estimation heuristique à partir des drawdowns crypto historiques — pas une promesse">Drawdown potentiel : <b>${escapeHtml(p.expected_drawdown || '?')}</b></span>
+                    <span>Horizon : <b>${escapeHtml(p.horizon || '?')}</b></span>
+                </div>
+                ${top ? `<div class="rpc-weights"><span class="rpc-wl">Positions BUY suggérées :</span> ${top}</div>`
+                      : `<div class="rpc-weights rpc-none">Aucune position BUY ne franchit les seuils — le budget altcoins reste en cash/stables.</div>`}
+                <p class="rpc-justif">${escapeHtml(p.justification || '')}</p>
+            </div>`;
+    }).join('');
+    el.innerHTML = `
+        <p class="report-summary">${escapeHtml(pf.posture_justification || '')}</p>
+        <div class="report-profiles">${cards}</div>
+        <p class="report-footnote">${escapeHtml(pf.cap_tier_note || '')}</p>`;
+}
+
+// ── Opportunités ──────────────────────────────────────────────────────────────
+function renderReportOpportunites(rep) {
+    const el = document.getElementById('report-opps');
+    if (el) {
+        const buys = (rep.assets || []).filter(a => a.signal === 'BUY').slice(0, 12);
+        el.innerHTML = buys.length ? buys.map(a => `
+            <div class="report-opp-card" data-sym="${escapeHtml(a.symbol)}">
+                <div class="roc-head">
+                    <span class="ra-sym">${escapeHtml(a.symbol)}</span>
+                    <span class="sig-badge ${sigClass(a.signal)}">${escapeHtml(a.action || 'acheter')}</span>
+                    <span class="rating-badge ${ratingClass(a.rating).replace('rating-badge ', '')}">${escapeHtml(a.rating)}</span>
+                    <span class="ra-conv">conviction ${escapeHtml(a.conviction || '?')}</span>
+                    <span class="roc-px">${fmtPrice(a.price)} <span class="${chgClass(a.change_24h)}">${fmtPct(a.change_24h)}</span></span>
+                </div>
+                <p class="roc-rationale">${escapeHtml(a.rationale || a.justification || '')}</p>
+                <div class="roc-levels">
+                    <span title="${escapeHtml(a.take_profit_note || '')}">🎯 TP : <b>${a.take_profit_zone != null ? fmtPrice(a.take_profit_zone) : unavail(a.take_profit_note)}</b></span>
+                    <span title="${escapeHtml(a.stop_loss_note || '')}">🛑 SL : <b>${a.stop_loss_zone != null ? fmtPrice(a.stop_loss_zone) : unavail(a.stop_loss_note)}</b></span>
+                    <span title="${escapeHtml(a.invalidation_note || '')}">⚠ Invalidation : <b>${a.invalidation_level != null ? fmtPrice(a.invalidation_level) : unavail(a.invalidation_note)}</b></span>
+                    <span>Poids suggéré (équilibré) : <b>${((a.recommended_weights || {}).equilibre ?? 0)}%</b></span>
+                </div>
+            </div>`).join('')
+            : `<div class="report-empty-sm">Aucun signal BUY aujourd'hui : aucune crypto ne réunit opportunité ≥ 75, risque ≤ 60 et confiance ≥ 65. C'est une information en soi — le modèle recommande la patience.</div>`;
+        el.querySelectorAll('.report-opp-card').forEach(it =>
+            it.addEventListener('click', () => { switchReportTab('classement'); showAssetDetail(it.dataset.sym); }));
+    }
+
+    const t1k = document.getElementById('report-top1000');
+    if (t1k) {
+        const wl = rep.watchlist_external || {};
+        if (wl.status === 'ok' || wl.status === 'partial') {
+            const opps = wl.new_opportunities || [];
+            const head = `<div class="report-summary">Source : ${escapeHtml(wl.source || 'coingecko')} ·
+                ${wl.rows_fetched || 0} coins lus · ${wl.tracked_count || 0} déjà suivis dans l'app ·
+                ${wl.excluded_count || 0} exclus (volume &lt; ${fmtUsdCompact(wl.min_volume_usd) || '?'} ou données insuffisantes)
+                ${wl.status === 'partial' ? ' · <span class="down">lecture partielle</span>' : ''}</div>`;
+            t1k.innerHTML = head + (opps.length ? `
+                <div class="report-table-wrap"><table class="report-table"><thead>
+                    <tr><th>Rang mcap</th><th>Symbole</th><th>Nom</th><th>Prix</th><th>24h</th><th>Volume 24h</th><th>Market cap</th></tr>
+                </thead><tbody>${opps.map(o => `
+                    <tr><td>${o.market_cap_rank ?? '?'}</td>
+                        <td class="rr-sym">${escapeHtml(o.base || '')}</td>
+                        <td class="rr-hor">${escapeHtml(o.name || '')}</td>
+                        <td>${fmtPrice(o.price)}</td>
+                        <td class="${chgClass(o.change_24h)}">${fmtPct(o.change_24h)}</td>
+                        <td>${fmtUsdCompact(o.volume_24h) || unavail('volume non fourni par CoinGecko')}</td>
+                        <td>${fmtUsdCompact(o.market_cap) || unavail('market cap non fournie par CoinGecko')}</td></tr>`).join('')}
+                </tbody></table></div>
+                <p class="report-footnote">Coins du top 1000 CoinGecko absents de l'univers Binance suivi, avec un volume 24h suffisant —
+                candidats à l'ajout, non scorés par le modèle (données 7j/30j et carnet non disponibles ici).</p>`
+                : `<div class="report-empty-sm">Aucune nouvelle opportunité hors univers ne franchit le plancher de volume.</div>`);
+        } else {
+            t1k.innerHTML = `<div class="report-empty-sm">Watchlist externe indisponible
+                (${escapeHtml(wl.reason || wl.error || wl.status || 'non récupérée')}). Le rapport reste valable sur l'univers suivi.</div>`;
+        }
+    }
+}
+
+// ── Risques ───────────────────────────────────────────────────────────────────
+function renderReportRisques(rep) {
+    const assets = rep.assets || [];
+    const mkRow = (a, why) => `
+        <div class="report-action-item" data-sym="${escapeHtml(a.symbol)}">
+            <span class="sig-badge ${sigClass(a.signal)}">${escapeHtml(a.action || a.signal)}</span>
+            <span class="ra-sym">${escapeHtml(a.symbol)}</span>
+            <span class="ra-conv">risque ${Math.round(a.risk_score || 0)}/100</span>
+            <span class="ra-just">${escapeHtml(why)}</span>
+        </div>`;
+    const sells = document.getElementById('report-sells');
+    if (sells) {
+        const rows = assets.filter(a => a.signal === 'SELL')
+            .sort((a, b) => (b.risk_score || 0) - (a.risk_score || 0)).slice(0, 10);
+        sells.innerHTML = rows.length ? rows.map(a => mkRow(a, a.rationale || a.justification || '')).join('')
+            : `<div class="report-empty-sm">Aucun signal SELL aujourd'hui.</div>`;
+        sells.querySelectorAll('.report-action-item').forEach(it =>
+            it.addEventListener('click', () => { switchReportTab('classement'); showAssetDetail(it.dataset.sym); }));
+    }
+    const avoids = document.getElementById('report-avoids');
+    if (avoids) {
+        const rows = assets.filter(a => a.signal === 'AVOID')
+            .sort((a, b) => (b.risk_score || 0) - (a.risk_score || 0)).slice(0, 10);
+        avoids.innerHTML = rows.length ? rows.map(a => mkRow(a, a.main_risk ? `Risque principal : ${a.main_risk}` : (a.justification || ''))).join('')
+            : `<div class="report-empty-sm">Aucun actif à éviter — qualité de données et liquidité correctes sur tout l'univers.</div>`;
+        avoids.querySelectorAll('.report-action-item').forEach(it =>
+            it.addEventListener('click', () => { switchReportTab('classement'); showAssetDetail(it.dataset.sym); }));
+    }
+    const heat = document.getElementById('report-heatmap');
+    if (heat) {
+        // Momentum (x) × risk (y) scatter; dot color = signal. Pure CSS, bounded
+        // to the universe size (≤300 dots, rendered once per open).
+        const dots = assets.filter(a => a.momentum != null && a.risk_score != null).map(a => {
+            const x = Math.round((a.momentum || 0) * 100);
+            const y = Math.round(100 - (a.risk_score || 0));
+            return `<span class="hm-dot ${sigClass(a.signal)}" style="left:${x}%;bottom:${100 - y}%"
+                title="${escapeHtml(a.symbol)} — momentum ${x}/100, risque ${Math.round(a.risk_score)}/100 (${escapeHtml(a.signal)})"
+                data-sym="${escapeHtml(a.symbol)}"></span>`;
+        }).join('');
+        heat.innerHTML = `
+            <div class="hm-canvas">${dots}</div>
+            <div class="hm-axes"><span>← momentum faible</span><span>momentum fort →</span></div>
+            <div class="hm-yaxis"><span>risque élevé ↑</span><span>risque faible ↓</span></div>`;
+        heat.querySelectorAll('.hm-dot').forEach(d =>
+            d.addEventListener('click', () => { switchReportTab('classement'); showAssetDetail(d.dataset.sym); }));
+    }
+}
+
+// ── Sources / qualité des données ────────────────────────────────────────────
+function renderReportSources(rep) {
+    const el = document.getElementById('report-dataquality');
+    if (!el) return;
+    const dq = rep.data_quality || {};
+    const src = dq.sources || {};
+    const srcRow = (name, info, desc) => {
+        const ok = info && (info.real === true || info.status === 'ok' || info.status === 'partial');
+        const detail = info && info.status ? info.status : (info && info.real ? 'réelle' : 'indisponible');
+        return `<div class="report-source-row">
+            <span class="src-dot ${ok ? 'ok' : 'ko'}"></span>
+            <span class="src-name">${escapeHtml(name)}</span>
+            <span class="src-status">${escapeHtml(detail)}</span>
+            <span class="src-desc">${escapeHtml(desc)}</span></div>`;
+    };
+    el.innerHTML = `
+        <div class="report-section-title">Qualité des données du rapport</div>
+        <div class="report-kpis">
+            ${kpiCard('Complétude', (dq.avg_completeness_pct != null ? dq.avg_completeness_pct + '%' : '—'), '', 'Part moyenne des champs réels présents par actif')}
+            ${kpiCard('Périmés', dq.stale_assets ?? '—', '', 'Actifs dont la donnée 24h est périmée')}
+            ${kpiCard('Conf. faible', dq.low_confidence_assets ?? '—', '', 'Actifs sous le seuil de confiance (forcés AVOID)')}
+            ${kpiCard('Sans spread', dq.assets_missing_spread ?? '—', '', 'Spread live réservé au symbole sélectionné (Tier 3)')}
+        </div>
+        <div class="report-section-title">Sources</div>
+        ${srcRow('Binance Spot (univers)', src.binance_universe, `ticker 24h réel — ${(src.binance_universe || {}).assets || 0} actifs`)}
+        ${srcRow('CoinGecko global', src.coingecko_global, 'market cap totale, dominance')}
+        ${srcRow('DefiLlama', src.defillama, 'TVL DeFi')}
+        ${srcRow('Fear & Greed', src.fear_greed, 'sentiment (alternative.me)')}
+        ${srcRow('CoinGecko top 1000', src.coingecko_top1000, 'watchlist externe')}
+        <div class="report-section-title">Lacunes connues (jamais fabriquées)</div>
+        <p class="report-summary">${(dq.known_gaps || []).map(escapeHtml).join(' · ') || '—'}</p>
+        <p class="report-footnote">${escapeHtml(dq.note || '')}</p>`;
+}
+
+// ── Historique & changements ──────────────────────────────────────────────────
+function renderReportChanges(rep) {
+    const el = document.getElementById('report-changes');
+    if (!el) return;
+    const ch = rep.changes_vs_previous;
+    if (!ch) {
+        el.innerHTML = `<div class="report-empty-sm">Pas de rapport antérieur comparable — les évolutions apparaîtront dès la prochaine génération.</div>`;
+        return;
+    }
+    const list = (items, fmt) => items && items.length
+        ? `<div class="report-chg-list">${items.map(fmt).join('')}</div>`
+        : `<div class="report-empty-sm">aucun</div>`;
+    el.innerHTML = `
+        <div class="report-section-title">Évolutions vs rapport du ${escapeHtml(ch.previous_report_date || '?')}</div>
+        <div class="report-grid-2">
+            <div><div class="rb-label">Améliorations de signal</div>
+                ${list(ch.signal_upgrades, x => `<span class="report-chg up">↑ ${escapeHtml(x.symbol)} ${escapeHtml(x.from)}→${escapeHtml(x.to)}</span>`)}</div>
+            <div><div class="rb-label">Dégradations de signal</div>
+                ${list(ch.signal_downgrades, x => `<span class="report-chg down">↓ ${escapeHtml(x.symbol)} ${escapeHtml(x.from)}→${escapeHtml(x.to)}</span>`)}</div>
+        </div>
+        <div class="report-grid-2">
+            <div><div class="rb-label">Baisses de confiance notables</div>
+                ${list(ch.confidence_drops, x => `<span class="report-chg down">${escapeHtml(x.symbol)} ${x.from}→${x.to}</span>`)}</div>
+            <div><div class="rb-label">Entrées / sorties de l'univers</div>
+                <div class="report-summary">${ch.new_symbols_count || 0} entrées · ${ch.dropped_symbols_count || 0} sorties</div></div>
+        </div>`;
+}
+
+function renderReportHistory() {
+    const el = document.getElementById('report-history');
+    if (!el) return;
+    const hist = reportState.history || [];
+    if (!hist.length) {
+        el.innerHTML = `<div class="report-empty-sm">Aucun historique pour le moment.</div>`;
+        return;
+    }
+    el.innerHTML = `<div class="report-hist-list">${hist.map(h => {
+        const c = h.signal_counts || {};
+        return `<div class="report-hist-row">
+            <span class="rh-date">${escapeHtml(h.report_date || '?')}</span>
+            <span class="rh-regime">${escapeHtml(REGIME_FR[h.market_regime] || h.market_regime || '—')}</span>
+            <span class="rh-counts"><b class="up">${c.BUY || 0}</b> BUY · ${c.HOLD || 0} HOLD ·
+                <b class="down">${c.SELL || 0}</b> SELL · ${c.AVOID || 0} AVOID</span>
+            <span class="rh-size">${h.universe_size || 0} cryptos</span>
+        </div>`;
+    }).join('')}</div>
+    <p class="report-footnote">Évolution du régime de marché : ${hist.slice(0, 14).reverse()
+        .map(h => `<span class="rh-chip rh-${escapeHtml(h.market_regime || 'neutral')}" title="${escapeHtml(h.report_date || '')}"></span>`).join('')}
+        <span class="rh-chip-legend">(14 derniers jours, vert = haussier, gris = neutre, rouge = baissier)</span></p>`;
 }
 
 function renderReportTable() {
@@ -2055,15 +2400,48 @@ function renderReportTable() {
             <td class="rr-sym">${escapeHtml(a.symbol)}</td>
             <td>${fmtPrice(a.price)}</td>
             <td class="${chgClass(a.change_24h)}">${fmtPct(a.change_24h)}</td>
-            <td>${fmtUsdCompact(a.quote_volume_24h) ?? 'n/a'}</td>
+            <td>${fmtUsdCompact(a.quote_volume_24h) ?? unavail('volume non fourni')}</td>
             <td><span class="sig-badge ${sigClass(a.signal)}">${a.signal}</span></td>
+            <td class="rr-hor">${escapeHtml(a.action || '—')}</td>
+            <td class="rr-hor">${escapeHtml(a.conviction || '—')}</td>
             <td><span class="rating-badge ${ratingClass(a.rating).replace('rating-badge ', '')}">${escapeHtml(a.rating)}</span></td>
             <td>${Math.round(a.opportunity_score)}</td>
             <td>${Math.round(a.risk_score)}</td>
             <td>${Math.round(a.confidence_score)}</td>
-            <td class="rr-hor">${escapeHtml(a.horizon || '')}</td>
         </tr>`).join('');
     body.querySelectorAll('tr').forEach(tr => tr.addEventListener('click', () => showAssetDetail(tr.dataset.sym)));
+}
+
+// Radar SVG (7 axes) of a selected asset's sub-scores. Pure SVG, no library.
+function radarSvg(scores, upProb) {
+    const axes = [
+        { label: 'Momentum', v: scores.momentum_score },
+        { label: 'Tendance', v: scores.trend_score },
+        { label: 'Volume', v: scores.volume_score },
+        { label: 'Liquidité', v: scores.liquidity_score },
+        { label: 'Stabilité', v: scores.volatility_score != null ? 100 - scores.volatility_score : null },
+        { label: 'Sécurité', v: scores.risk_score != null ? 100 - scores.risk_score : null },
+        { label: 'Upside', v: upProb != null ? Math.round(upProb * 100) : null },
+    ];
+    const cx = 110, cy = 100, R = 70, n = axes.length;
+    const pt = (i, r) => {
+        const ang = (Math.PI * 2 * i) / n - Math.PI / 2;
+        return [cx + r * Math.cos(ang), cy + r * Math.sin(ang)];
+    };
+    const grid = [0.33, 0.66, 1.0].map(f =>
+        `<polygon points="${axes.map((_, i) => pt(i, R * f).map(v => v.toFixed(1)).join(',')).join(' ')}" class="radar-grid"/>`).join('');
+    const spokes = axes.map((_, i) => {
+        const [x, y] = pt(i, R);
+        return `<line x1="${cx}" y1="${cy}" x2="${x.toFixed(1)}" y2="${y.toFixed(1)}" class="radar-grid"/>`;
+    }).join('');
+    const poly = axes.map((a, i) => pt(i, R * Math.max(0.04, (a.v ?? 0) / 100)).map(v => v.toFixed(1)).join(',')).join(' ');
+    const labels = axes.map((a, i) => {
+        const [x, y] = pt(i, R + 16);
+        const txt = a.v == null ? `${a.label} (indispo.)` : `${a.label} ${Math.round(a.v)}`;
+        return `<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" class="radar-label ${a.v == null ? 'radar-na' : ''}" text-anchor="middle" dominant-baseline="middle">${escapeHtml(txt)}</text>`;
+    }).join('');
+    return `<svg viewBox="0 0 220 200" class="radar-svg" role="img" aria-label="Scores radar">
+        ${grid}${spokes}<polygon points="${poly}" class="radar-shape"/>${labels}</svg>`;
 }
 
 function showAssetDetail(symbol) {
@@ -2074,14 +2452,27 @@ function showAssetDetail(symbol) {
     if (!a || !panel) return;
     reportState.selected = symbol;
     const p = a.prediction || {};
-    const m = a.metrics || {};
-    const ratioRow = (label, v) => `<div class="rd-ratio"><span>${escapeHtml(label)}</span><b>${v == null ? 'N/A' : (typeof v === 'number' ? v.toFixed(2) : v)}</b></div>`;
+    const s = a.scores || {};
+    const w = a.recommended_weights || {};
+    const scoreRow = (label, v, why) => `<div class="rd-ratio"><span>${escapeHtml(label)}</span>
+        <b>${v == null ? unavail(why || 'sous-score non calculable (donnée source absente)') : Math.round(v) + '/100'}</b></div>`;
+    const evidence = (a.source_evidence || []).map(e => {
+        const val = Array.isArray(e.value) ? e.value.map(v => v == null ? '?' : v).join(' – ') : e.value;
+        const age = e.age_ms != null ? ` · ${e.age_ms < 5000 ? 'temps réel' : Math.round(e.age_ms / 1000) + ' s'}` : '';
+        return `<div class="rd-evidence-row ${e.available ? '' : 'rd-ev-missing'}">
+            <span class="rd-ev-src">${escapeHtml(e.source || '')}</span>
+            <span class="rd-ev-metric">${escapeHtml(e.metric || '')}</span>
+            <span class="rd-ev-val">${e.available ? escapeHtml(String(val ?? '')) + age : unavail(e.note)}</span>
+            ${e.available && e.note ? `<span class="rd-ev-note">${escapeHtml(e.note)}</span>` : ''}
+        </div>`;
+    }).join('');
     panel.innerHTML = `
         <div class="rd-head">
             <div><span class="rd-sym">${escapeHtml(a.symbol)}</span>
                 <span class="sig-badge ${sigClass(a.signal)}">${a.signal}</span>
+                <span class="sig-badge ${sigClass(a.signal)}">${escapeHtml(a.action || '')}</span>
                 <span class="rating-badge ${ratingClass(a.rating).replace('rating-badge ', '')}">${escapeHtml(a.rating)}</span>
-                <span class="rd-hor">${escapeHtml(a.horizon || '')}</span>
+                <span class="rd-hor">conviction ${escapeHtml(a.conviction || '?')} · ${escapeHtml(a.horizon || '')}</span>
             </div>
             <button class="close-btn" id="rd-close" aria-label="Close detail">&times;</button>
         </div>
@@ -2089,28 +2480,38 @@ function showAssetDetail(symbol) {
             <span>Opportunité <b>${Math.round(a.opportunity_score)}</b>/100</span>
             <span>Risque <b>${Math.round(a.risk_score)}</b>/100</span>
             <span>Confiance <b>${Math.round(a.confidence_score)}</b>/100</span>
+            <span>Poids suggéré : prudent <b>${w.prudent ?? 0}%</b> · équilibré <b>${w.equilibre ?? 0}%</b> · agressif <b>${w.agressif ?? 0}%</b></span>
         </div>
-        <p class="rd-explain">${escapeHtml(a.explanation_simple || '')}</p>
+        <p class="rd-explain">${escapeHtml(a.rationale || a.justification || '')}</p>
+        <div class="rd-flex">
+            <div class="rd-radar">${radarSvg(s, p.up_probability)}</div>
+            <div class="rd-ratios">
+                ${scoreRow('Momentum', s.momentum_score)}
+                ${scoreRow('Tendance', s.trend_score)}
+                ${scoreRow('Volume', s.volume_score)}
+                ${scoreRow('Liquidité', s.liquidity_score)}
+                ${scoreRow('Force vs BTC', s.relative_strength_score)}
+                ${scoreRow('Volatilité', s.volatility_score)}
+                ${scoreRow('Drawdown', s.drawdown_score)}
+                ${scoreRow('Régime marché', s.market_regime_score)}
+            </div>
+        </div>
         <div class="rd-pred">
             <div class="rd-prob">
                 <span class="up">Hausse ${Math.round((p.up_probability || 0) * 100)}%</span>
                 <span class="down">Baisse ${Math.round((p.down_probability || 0) * 100)}%</span>
                 <span class="rd-conf">confiance : ${escapeHtml(p.confidence_level || '?')}</span>
             </div>
-            <p class="rd-scn">${escapeHtml(p.scenario || '')}</p>
             <p class="rd-scn rd-bull">▲ ${escapeHtml(p.bullish_case || '')}</p>
             <p class="rd-scn rd-bear">▼ ${escapeHtml(p.bearish_case || '')}</p>
-            <p class="rd-scn rd-inval">⚠ ${escapeHtml(p.invalidation || '')}</p>
+            <p class="rd-scn rd-inval">⚠ Invalidation : ${a.invalidation_level != null ? fmtPrice(a.invalidation_level) + ' — ' : ''}${escapeHtml(a.invalidation_note || p.invalidation || '')}</p>
+            <p class="rd-scn">🎯 TP indicatif : ${a.take_profit_zone != null ? fmtPrice(a.take_profit_zone) : unavail(a.take_profit_note)} ·
+               🛑 SL indicatif : ${a.stop_loss_zone != null ? fmtPrice(a.stop_loss_zone) : unavail(a.stop_loss_note)}</p>
         </div>
-        <div class="rd-ratios">
-            ${ratioRow('Momentum', m.momentum_ratio)}
-            ${ratioRow('Volume confirm.', m.volume_confirmation_ratio)}
-            ${ratioRow('Liquidité', m.liquidity_ratio)}
-            ${ratioRow('Force vs BTC', m.relative_strength_btc)}
-            ${ratioRow('Qualité tendance', m.trend_quality_ratio)}
-            ${ratioRow('Volatilité', m.volatility_ratio)}
-        </div>
-        <div class="rd-justif">${escapeHtml(a.justification || '')}</div>`;
+        ${(a.contradictions || []).length ? `<div class="rd-contra">⚖ Signaux contradictoires : ${a.contradictions.map(escapeHtml).join(' ; ')}</div>` : ''}
+        ${a.main_risk ? `<div class="rd-contra">⚠ Risque principal : ${escapeHtml(a.main_risk)}</div>` : ''}
+        <div class="report-section-title">Source evidence (données réelles utilisées)</div>
+        <div class="rd-evidence">${evidence || `<div class="report-empty-sm">Aucune donnée source — actif non scorable.</div>`}</div>`;
     panel.classList.remove('hidden');
     const cl = document.getElementById('rd-close');
     if (cl) cl.addEventListener('click', () => { panel.classList.add('hidden'); reportState.selected = null; renderReportTable(); });

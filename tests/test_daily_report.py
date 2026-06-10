@@ -209,8 +209,12 @@ def test_build_report_shape():
         assert k in a0
     # unavailable horizons honestly None
     assert a0["change_7d"] is None and a0["market_cap"] is None
+    # Compliance framing: decision-support by quant model + risk warning, without
+    # claiming regulated personalized advice.
     assert rep["disclaimer"]
-    assert "conseil financier" in rep["disclaimer"]
+    assert "modèle" in rep["disclaimer"] and "quantitatif" in rep["disclaimer"]
+    assert "volatil" in rep["disclaimer"]
+    assert "décision financière" in rep["report_kind"]
 
 
 def test_source_evidence_is_honest_not_fabricated():
@@ -233,9 +237,11 @@ def test_markdown_render_contains_sections():
     md = generator.render_markdown(rep)
     assert "# Rapport Crypto Quotidien — 2026-06-10" in md
     assert "Résumé exécutif" in md
+    assert "Portefeuille modèle" in md
     assert "Distribution des ratings" in md
     assert "Classement global" in md
-    assert "conseil financier" in md  # disclaimer present
+    assert "Qualité des données" in md
+    assert "modèle" in md and "quantitatif" in md  # disclaimer present
 
 
 def test_build_report_300_performance():
@@ -249,6 +255,122 @@ def test_build_report_300_performance():
     assert len(rep["assets"]) == 300
     # Must be fast (well under a second on CI); generous bound to avoid flakiness.
     assert elapsed < 3.0
+
+
+# ── decision-support layer (v2) ───────────────────────────────────────────────
+
+def _build(n=20, gc=None, **kw):
+    return generator.build_daily_report(
+        _universe(n), gc, generated_at="2026-06-10T00:00:00+00:00",
+        report_date="2026-06-10", **kw)
+
+
+def test_assets_carry_decision_fields():
+    rep = _build(20)
+    a0 = rep["assets"][0]
+    for k in ("conviction", "action", "rationale", "main_risk", "contradictions",
+              "scores", "recommended_weights", "max_weight", "cap_tier",
+              "invalidation_level", "take_profit_zone", "stop_loss_zone"):
+        assert k in a0, k
+    assert a0["conviction"] in ("forte", "moyenne", "faible")
+    assert a0["action"] in ("acheter", "renforcer", "conserver", "surveiller",
+                            "alléger", "vendre", "éviter")
+    # sub-scores all bounded 0-100 (or honest None)
+    for k, v in a0["scores"].items():
+        if v is not None:
+            assert 0 <= v <= 100, (k, v)
+    # weights per profile present and bounded
+    for p in ("prudent", "equilibre", "agressif"):
+        assert 0 <= a0["recommended_weights"][p] <= 100
+
+
+def test_levels_come_from_real_24h_range():
+    # BUY/HOLD thesis: TP = real 24h high, invalidation/SL = real 24h low.
+    a = generator._row_to_input(mk_row("L/USDT", price=100, high=110, low=90))
+    lv = generator._levels("HOLD", a)
+    assert lv["take_profit_zone"] == 110 and lv["invalidation_level"] == 90
+    assert lv["stop_loss_zone"] == 90
+    # SELL thesis flips: invalidation = reclaim of the 24h high.
+    lv_sell = generator._levels("SELL", a)
+    assert lv_sell["invalidation_level"] == 110 and lv_sell["take_profit_zone"] == 90
+    # missing range → no fabricated levels
+    a2 = generator._row_to_input({"symbol": "X/USDT", "price": 10.0, "change_pct": 1.0})
+    lv2 = generator._levels("HOLD", a2)
+    assert lv2["invalidation_level"] is None
+    assert "indisponible" in lv2["invalidation_note"].lower()
+
+
+def test_executive_summary_and_portfolio_block():
+    rep = _build(20, {"sentiment": {"real": True, "value": 60},
+                      "market": {"real": True, "market_cap_change_24h_pct": 1.0}})
+    ex = rep["executive_summary"]
+    assert ex["posture"] in ("offensif", "equilibre", "defensif", "cash_majoritaire")
+    assert ex["global_conviction"] in ("forte", "moyenne", "faible")
+    assert ex["model_confidence"] is not None
+    pf = rep["portfolio_models"]
+    assert set(pf["profiles"]) == {"prudent", "equilibre", "agressif"}
+    for prof in pf["profiles"].values():
+        alloc = prof["allocation"]
+        assert sum(alloc.values()) == 100  # allocations always sum to 100%
+        assert prof["expected_drawdown"] and prof["horizon"]
+
+
+def test_data_quality_block_is_honest():
+    rep = _build(10)
+    dq = rep["data_quality"]
+    assert 0 <= dq["avg_completeness_pct"] <= 100
+    assert "change_7d" in " ".join(dq["known_gaps"])
+    assert dq["sources"]["binance_universe"]["real"] is True
+    # no universe → quality reflects it
+    rep2 = generator.build_daily_report([], None, generated_at="2026-06-10T00:00:00+00:00",
+                                        report_date="2026-06-10")
+    assert rep2["data_quality"]["sources"]["binance_universe"]["real"] is False
+
+
+def test_changes_vs_previous_detects_transitions():
+    prev = _build(10)
+    # mutate the previous report: flip one symbol's signal + lower confidence
+    sym = prev["assets"][0]["symbol"]
+    prev["assets"][0]["signal"] = "AVOID"
+    prev["assets"][1]["confidence_score"] = (prev["assets"][1]["confidence_score"] or 0) + 30
+    cur = _build(10, previous_report=prev)
+    ch = cur["changes_vs_previous"]
+    assert ch is not None and ch["previous_report_date"] == "2026-06-10"
+    moved = [c for c in ch["signal_upgrades"] if c["symbol"] == sym]
+    assert moved and moved[0]["from"] == "AVOID"
+    assert any(c["symbol"] == prev["assets"][1]["symbol"] for c in ch["confidence_drops"])
+    # no previous → honest None
+    assert _build(5)["changes_vs_previous"] is None
+
+
+def test_external_watchlist_passthrough_and_default():
+    wl = {"status": "ok", "new_opportunities": [], "tracked_count": 3}
+    rep = _build(5, external_watchlist=wl)
+    assert rep["watchlist_external"]["status"] == "ok"
+    rep2 = _build(5)
+    assert rep2["watchlist_external"]["status"] == "unavailable"  # never fabricated
+
+
+def test_source_evidence_has_freshness_and_reasons():
+    rows = _universe(5)
+    for r in rows:
+        r["updated_at"] = 1_700_000_000_000
+        r["age_ms"] = 1200
+    rep = generator.build_daily_report(rows, None, generated_at="2026-06-10T00:00:00+00:00",
+                                       report_date="2026-06-10")
+    ev = rep["assets"][0]["source_evidence"]
+    price_ev = [e for e in ev if e["metric"] == "price"][0]
+    assert price_ev["as_of_ms"] == 1_700_000_000_000 and price_ev["age_ms"] == 1200
+    # unavailable entries carry an explicit French reason (no bare N/A)
+    unav = [e for e in ev if not e["available"]]
+    assert unav and all(e["note"] for e in unav)
+
+
+def test_rationale_is_decision_grade():
+    rep = _build(20)
+    a0 = rep["assets"][0]
+    assert "Le modèle recommande" in a0["rationale"]
+    assert "Risque principal" in a0["rationale"]
 
 
 # ── store round-trip ──────────────────────────────────────────────────────────

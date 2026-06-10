@@ -37,7 +37,7 @@ from typing import Optional
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import settings
-from reports import generator, store
+from reports import generator, store, top1000
 from reports.store import ReportStore
 from metrics import (
     start_metrics_server, daily_report_runs_total, daily_report_errors_total,
@@ -137,15 +137,35 @@ async def generate_report(*, trigger: str = "schedule", pool=None) -> dict:
     global_ctx = await asyncio.to_thread(
         fetch_global_context, settings.DAILY_REPORT_API_BASE, settings.DAILY_REPORT_HTTP_TIMEOUT)
 
+    rstore = ReportStore(_resolve_dir())
+    # Previous report: most recent date strictly before today (day-over-day diff).
+    prev_date = next((d for d in rstore.dates() if d < report_date), None)
+    previous = rstore.load(prev_date) if prev_date else None
+
+    # External top-1000 watchlist (CoinGecko, best-effort — never blocks the report).
+    universe_bases = {(r.get("base") or "").upper() for r in rows if r.get("base")}
+    try:
+        watchlist = await asyncio.to_thread(
+            top1000.build_external_watchlist,
+            settings.COINGECKO_API_BASE, universe_bases,
+            enabled=settings.ENABLE_TOP1000_WATCHLIST,
+            min_volume_usd=settings.TOP1000_MIN_VOLUME_USD,
+            pages=settings.TOP1000_PAGES,
+            timeout=settings.GLOBAL_CONTEXT_HTTP_TIMEOUT,
+            api_key=settings.COINGECKO_API_KEY)
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("Top-1000 watchlist unavailable (continuing without): %s", e)
+        watchlist = {"status": "unavailable", "source": "coingecko", "error": str(e)}
+
     report = generator.build_daily_report(
         rows, global_ctx, generated_at=generated_at, report_date=report_date,
-        top_n=settings.DAILY_REPORT_TOP_N)
+        top_n=settings.DAILY_REPORT_TOP_N,
+        previous_report=previous, external_watchlist=watchlist)
     report["status"] = "ok" if rows else "error"
     if not rows:
         report["error_message"] = "universe unavailable (no real rows from /api/market/universe)"
 
     markdown = generator.render_markdown(report)
-    rstore = ReportStore(_resolve_dir())
     entry = await asyncio.to_thread(rstore.save, report, markdown)
     report["_json_path"] = entry["json_path"]
     report["_markdown_path"] = entry["markdown_path"]

@@ -1,20 +1,26 @@
-# Daily Crypto Intelligence Report
+# Daily Crypto Report — aide à la décision financière
 
-> **Avertissement / Not financial advice.** Ce rapport est généré automatiquement à
-> partir de données de marché **réelles** (Binance Spot 24h + contexte macro). Il a une
-> vocation **informative et pédagogique**. **Ce n'est PAS un conseil financier
-> personnalisé.** Les prédictions sont **indicatives**, exprimées en **probabilités** et
-> **scénarios**, et n'ont **aucune valeur de certitude**. Le marché crypto est volatil :
-> ne risquez que ce que vous pouvez vous permettre de perdre.
+> **Cadrage.** *Rapport d'aide à la décision financière — recommandations générées par
+> modèle quantitatif*, à partir de données de marché **réelles** (Binance Spot 24h,
+> CoinGecko, DefiLlama, alternative.me). Les crypto-actifs sont **volatils** : les
+> recommandations dépendent de la **qualité et de la disponibilité des données** au moment
+> de la génération, et les scénarios sont exprimés en **probabilités**, jamais en
+> certitudes. Le rapport est **actionnable et assumé** (BUY/HOLD/SELL/AVOID, allocations,
+> niveaux), sans prétendre au conseil personnalisé réglementé.
 
 ## 1. Objectif
 
-Produire, **chaque jour automatiquement** (par défaut à minuit), une analyse complète et
-**compréhensible par un débutant** mais crédible financièrement, sur les **~300
-cryptomonnaies** déjà suivies par le cockpit (univers Binance Spot). Pour chaque crypto :
-classement global, prédiction indicative court terme, signal **BUY / HOLD / SELL / AVOID**,
-justification claire, ratios explicables, rating **A+→E**, explication pédagogique, et une
-section **source evidence** basée sur les vraies données disponibles.
+Produire, **chaque jour automatiquement** (par défaut à minuit), un rapport
+d'investissement professionnel sur les **~300 cryptomonnaies** suivies par le cockpit
+(univers Binance Spot), enrichi du **top 1000 CoinGecko** (watchlist externe). Pour chaque
+crypto : classement global, signal **BUY / HOLD / SELL / AVOID** + **action portefeuille**
+(acheter / renforcer / conserver / surveiller / alléger / vendre / éviter), **conviction**
+(forte/moyenne/faible), rating **A+→E**, **rationale décisionnelle** (métriques
+déclencheuses, signaux contradictoires, risque principal), scénarios haussier/baissier,
+**niveaux d'invalidation / TP / SL indicatifs** (dérivés des niveaux 24h réels), poids
+recommandés par profil, et **source evidence** horodatée. Au niveau portefeuille : un
+**positionnement recommandé** (offensif / équilibré / défensif / cash majoritaire) et des
+**allocations modèles** pour 3 profils (prudent / équilibré / agressif).
 
 ## 2. Périmètre & limites (réel uniquement)
 
@@ -26,10 +32,15 @@ de confiance** — jamais une valeur inventée.
 |---|---|---|
 | Prix, variation **24h**, volume 24h, nb trades 24h | ✅ réel | Binance `!ticker@arr` (universe) |
 | High/Low/Open 24h, **VWAP** 24h, spread (bid/ask) | ✅ réel | Binance ticker 24h |
-| Variation **1h / 7j / 30j** | ❌ N/A | non fournie par le ticker 24h |
-| **Market cap** par actif | ❌ N/A | nécessite un agrégateur (CoinGecko markets) |
-| Profondeur L2 (depth) par actif | ❌ N/A | réservée au symbole sélectionné (Tier 3) |
+| Variation **1h / 7j / 30j** (univers) | ❌ indisponible | non fournie par le ticker 24h |
+| **Market cap** par actif de l'univers | ❌ indisponible | réservée à la watchlist externe |
+| Market cap, rang, prix, 24h, volume **top 1000** | ✅ réel (best-effort) | CoinGecko `/coins/markets` (4×250, sans clé) |
+| Profondeur L2 (depth) par actif | ❌ indisponible | réservée au symbole sélectionné (Tier 3) |
 | Régime de marché, Fear&Greed, mcap 24h | ✅ réel | tier macro `global_context` |
+
+> L'UI n'affiche jamais un `N/A` brut : chaque absence est rendue **« Donnée
+> indisponible »** avec la **raison au survol**, et **dégrade le score de confiance**
+> de l'actif. Trop de données manquantes ⇒ signal **AVOID**.
 
 > Ces absences sont **assumées** : le rapport reste honnête et la confiance est abaissée en
 > conséquence. Une montée en richesse (1h/7j/30j, market cap) via CoinGecko markets est une
@@ -39,11 +50,25 @@ de confiance** — jamais une valeur inventée.
 
 Module isolé `reports/` (logique pure vs I/O, comme le reste du repo) :
 
-- **`reports/scoring.py`** — formules **pures** (ratios, scores, rating, signal, prédiction,
-  régime). Zéro I/O. **Source unique de vérité** des chiffres → le worker et l'API ne
-  peuvent pas diverger.
-- **`reports/generator.py`** — `build_daily_report(rows, global_context, …)` → dict JSON
-  structuré + `render_markdown(report)` → Markdown français. Pur (données en entrée → sortie).
+- **`reports/scoring.py`** — formules **pures** (ratios, sous-scores 0–100, scores finaux,
+  rating, signal, **conviction**, **signaux contradictoires**, prédiction, régime). Zéro
+  I/O. **Source unique de vérité** des chiffres → le worker et l'API ne peuvent pas diverger.
+- **`reports/portfolio_advisor.py`** — couche portefeuille **pure** : posture marché
+  (offensif/équilibré/défensif/cash majoritaire), **allocations modèles** par profil
+  (prudent/équilibré/agressif, somme = 100 %), tiers de taille (proxy percentile de volume
+  24h réel — la market cap exacte n'est jamais fabriquée), **actions par actif** et **poids
+  recommandés** plafonnés par des règles de sécurité codées : small cap illiquide jamais
+  surpondérée (exclue pour le profil prudent), token très volatil plafonné à moitié,
+  mid/small caps repassées en cash si la largeur de marché est négative.
+- **`reports/top1000.py`** — watchlist externe **CoinGecko top 1000** : parsing +
+  classification **purs** (suivies / nouvelles opportunités / exclues avec raison), fetch
+  **best-effort** (lecture partielle conservée, statut `ok/partial/unavailable/disabled`,
+  jamais une liste fabriquée).
+- **`reports/generator.py`** — `build_daily_report(rows, global_context, …,
+  previous_report, external_watchlist)` → dict JSON structuré (résumé exécutif,
+  portefeuille modèle, recommandations par actif avec niveaux et evidence, `data_quality`,
+  `changes_vs_previous`) + `render_markdown(report)` → Markdown français type rapport de
+  gestion. Pur (données en entrée → sortie).
 - **`reports/store.py`** — persistance : écrit le **JSON + Markdown sur disque** (source de
   vérité, conforme à la politique « pas de gros blobs en PG ») + miroir **best-effort** d'un
   index (et des scores par actif) dans Postgres.
@@ -73,24 +98,34 @@ les scores finaux dans `[0,100]`. Constantes nommées dans `reports/scoring.py`.
 - **Market Context** `[0,1]` — `0.4·Fear&Greed + 0.3·mcap24h + 0.3·largeur_marché` (commun).
 
 ### Scores finaux
-**Final Opportunity Score** `0–100` :
+**Final Opportunity Score** `0–100` (le Risk Score est calculé **d'abord** car il entre en
+pénalité) :
 
 | Composante | Poids |
 |---|---|
 | momentum | 25 % |
-| volume confirmation | 20 % |
-| liquidity | 20 % |
+| trend quality | 20 % |
+| volume confirmation | 15 % |
 | relative strength vs BTC | 15 % |
-| trend quality | 10 % |
-| market context | 5 % |
-| source confidence | 5 % |
+| liquidity | 10 % |
+| market regime | 10 % |
+| **risk penalty** (− risk/100) | **− 5 %** |
 
-**Risk Score** `0–100` : volatilité 30 %, drawdown 25 %, spread 15 %, faible liquidité 20 %,
-données manquantes 10 %.
+**Risk Score** `0–100` : volatilité 30 %, drawdown 25 %, illiquidité 20 %, qualité de
+données 15 % (champs manquants + staleness), microstructure/spread 10 %. *(Le
+« concentration risk » du spec nécessite des données de détention on-chain qu'on n'a pas —
+règle real-data-only — son slot est tenu par le risque de microstructure, proxy réel le
+plus proche de la manipulabilité.)*
 
 **Confidence Score** `0–100` : complétude des données 35 %, liquidité 30 %, fraîcheur 20 %,
 couverture d'horizon 15 % (**plafonnée** car seul l'horizon 24h est réel → on ne prétend
 jamais à une confiance maximale).
+
+**Sous-scores exposés** (`scores` par actif, 0–100, `None` honnête si l'entrée manque) :
+`momentum_score`, `trend_score`, `volume_score`, `liquidity_score`, `volatility_score`,
+`drawdown_score`, `relative_strength_score`, `market_regime_score`, `risk_score`,
+`opportunity_score`, `confidence_score` — consommés tels quels par l'UI (radar, tableaux),
+qui ne recalcule jamais un chiffre.
 
 ## 5. Échelle de rating
 
@@ -111,13 +146,28 @@ peut pas obtenir un bon rating).
 Ordre d'évaluation (le premier qui s'applique gagne) :
 
 1. **AVOID** — `stale`, **ou** liquidity < 0.25, **ou** spread > 60 bps, **ou** confiance < 35,
-   **ou** risk ≥ 80. (Mouvement fragile/manipulable ou données insuffisantes.)
-2. **BUY** — opportunity ≥ 75 **et** risk ≤ 45 **et** confiance ≥ 65.
-3. **SELL** — variation 24h ≤ −3 % **et** momentum < 0.40 **et** risk ≥ 55.
-4. **HOLD** — sinon (pas de confirmation suffisante).
+   **ou** risk ≥ 80, **ou** **pump suspect** (|variation 24h| ≥ 18 % sans support
+   volume/VWAP < 0.35). (Mouvement fragile/manipulable ou données insuffisantes.)
+2. **BUY** — opportunity ≥ 75 **et** risk ≤ 60 **et** confiance ≥ 65 **et** momentum > 0.5
+   **et** liquidity ≥ 0.35 (momentum positif + liquidité suffisante exigés).
+3. **SELL** — variation 24h ≤ −3 % **et** momentum < 0.40 **et** (risk ≥ 55 **ou** rupture
+   de tendance court terme : prix sous son VWAP 24h avec drawdown ≥ 0.5).
+4. **HOLD** — sinon (opportunité 50–75, signaux contradictoires, ou tendance positive mais
+   risque élevé → pas de confirmation suffisante).
 
-Chaque signal porte une **justification** courte (FR) et une **explication simple** pour
-débutant, dérivées des facteurs dominants (momentum, liquidité, volume, risque).
+Chaque signal porte : une **conviction** (forte/moyenne/faible — confiance + marge vs les
+seuils), une **action portefeuille** (BUY forte → *renforcer*, BUY → *acheter*, SELL forte
+→ *vendre*, SELL → *alléger*, AVOID → *éviter*, HOLD opportun → *surveiller*, sinon
+*conserver*), une **rationale décisionnelle** (métriques déclencheuses chiffrées, risque
+principal, signaux contradictoires), une **justification** courte et une **explication
+simple** pour débutant.
+
+### Niveaux indicatifs (réels uniquement)
+Les niveaux d'**invalidation / take-profit / stop-loss** sont dérivés **exclusivement des
+niveaux 24h réellement observés** (plus bas / plus haut / VWAP) — jamais de cible
+fabriquée. Thèse haussière : invalidation = cassure du plus bas 24h, TP = zone du plus haut
+24h. Thèse SELL : inversée (reprise du plus haut 24h = invalidation). Niveau manquant ⇒
+« Donnée indisponible » + raison.
 
 ## 7. Prédiction (transparente, prudente)
 
@@ -137,14 +187,26 @@ cassure du plus bas 24h), plus un **niveau de confiance** (élevé/modéré/faib
   - `GET /api/reports/daily/latest` — dernier rapport (JSON complet) ou état honnête si aucun.
   - `GET /api/reports/daily/{date}` — rapport d'une date (`YYYY-MM-DD`).
   - `GET /api/reports/daily/history` — liste des rapports (récent → ancien).
-  - `POST /api/reports/daily/generate` — génère **maintenant** (test/admin), depuis les hubs.
+  - `POST /api/reports/daily/generate` — génère **maintenant** (bouton « Générer »), depuis les hubs.
   - `GET /api/reports/daily/latest/assets/{symbol}` — analyse détaillée d'une crypto.
+  - `GET /api/reports/daily/{date}/crypto/{symbol}` — idem pour une date (`latest` accepté).
+  - `GET /api/reports/opportunities/top1000` — watchlist externe du dernier rapport.
+  - `GET /api/reports/portfolio/model` — bloc portefeuille modèle du dernier rapport.
+- **Diff quotidien** : le générateur reçoit le **rapport précédent** (date strictement
+  antérieure) et produit `changes_vs_previous` : passages de signal (HOLD→BUY, BUY→SELL…),
+  baisses de confiance ≥ 15 pts, entrées/sorties de l'univers.
 - **Formats** : **JSON** structuré (`reports/daily_crypto_report_YYYY-MM-DD.json`, pour
   l'API/front) + **Markdown** lisible (`reports/daily_crypto_report_YYYY-MM-DD.md`). Un PDF
   est une amélioration future (non prioritaire).
-- **Frontend** : bouton header **📅 Report** → modale « Rapport Crypto Quotidien » : résumé
-  + KPIs, distribution des ratings, top BUY/SELL/À-surveiller, table **filtrable (signal,
-  rating) / triable / recherchable** des 300, détail d'une crypto au clic.
+- **Frontend** : bouton header **📅 Report** → modale à **7 onglets** : **Synthèse**
+  (positionnement recommandé, conviction, régime, KPIs, distributions signaux/ratings en
+  barres, top actions du jour, mini-diff), **Portefeuille** (3 cartes profil : barre
+  d'allocation empilée, drawdown estimé, horizon, positions BUY suggérées),
+  **Opportunités** (cartes BUY avec rationale + TP/SL/invalidation + watchlist top 1000),
+  **Risques** (SELL/AVOID + carte momentum × risque), **Classement** (table filtrable /
+  triable / recherchable avec action + conviction, détail au clic : **radar SVG** des
+  sous-scores + evidence horodatée), **Sources** (qualité des données, statut par source,
+  lacunes connues), **Historique** (diff complet + liste des rapports + frise du régime).
 
 ## 9. Stockage
 
@@ -187,20 +249,34 @@ $env:PYTHONPATH="."; python -m workers.report_worker --once
 `ENABLE_DAILY_REPORT`, `DAILY_REPORT_HOUR`, `DAILY_REPORT_MINUTE`, `DAILY_REPORT_TIMEZONE`
 (IANA, fallback UTC si `tzdata` absent), `DAILY_REPORT_DIR`, `DAILY_REPORT_UNIVERSE_LIMIT`,
 `DAILY_REPORT_TOP_N`, `DAILY_REPORT_HISTORY_LIMIT`, `DAILY_REPORT_API_BASE`,
-`DAILY_REPORT_HTTP_TIMEOUT`, `DAILY_REPORT_PERSIST_DB`.
+`DAILY_REPORT_HTTP_TIMEOUT`, `DAILY_REPORT_PERSIST_DB`, `ENABLE_TOP1000_WATCHLIST`,
+`TOP1000_PAGES`, `TOP1000_MIN_VOLUME_USD` (réutilise `COINGECKO_API_BASE` /
+`COINGECKO_API_KEY` / `GLOBAL_CONTEXT_HTTP_TIMEOUT`).
 
 ## 13. Tests
 
-`tests/test_daily_report.py` (offline) : bornes/direction des ratios, bandes de rating,
-signaux BUY/HOLD/SELL/AVOID aux seuils, robustesse données manquantes (pas de crash, N/A
-honnête), prudence des prédictions (proba strictement dans `[0.15,0.85]`, jamais de
-certitude), assemblage JSON + rendu Markdown, **univers simulé de 300 cryptos + perf**
-(< 3 s), round-trip du store + historique, helpers de planification du worker.
+Offline, sans réseau ni DB :
+- `tests/test_daily_report.py` — bornes/direction des ratios, bandes de rating, signaux
+  BUY/HOLD/SELL/AVOID aux seuils, conviction/action/rationale présents, **niveaux TP/SL/
+  invalidation = niveaux 24h réels** (et jamais fabriqués si absents), bloc `data_quality`
+  honnête, diff `changes_vs_previous` (transitions de signal, baisses de confiance),
+  evidence horodatée avec raisons FR, robustesse données manquantes, prudence des
+  prédictions (`[0.15,0.85]`), assemblage JSON + Markdown, univers simulé 300 + perf,
+  round-trip store, scheduler.
+- `tests/test_portfolio_advisor.py` — mapping posture, allocations = 100 % pour toutes
+  postures×profils, règle largeur de marché négative, caps de sécurité (small cap
+  illiquide, volatilité), verbes d'action, poids ≤ budget et ≤ caps, bloc assemblé.
+- `tests/test_top1000.py` — parsing payload CoinGecko (rows réelles uniquement),
+  classification suivies/nouvelles/exclues avec raisons, tri par volume + cap, statuts
+  honnêtes `disabled`/`unavailable`.
 
 ## 14. Améliorations futures
 
 - Backtest **prédiction vs réalité** J+1/J+7 (la table `daily_crypto_asset_score` est déjà prête).
-- Enrichissement **1h/7j/30j + market cap** via CoinGecko `/coins/markets`.
+- Enrichissement **1h/7j/30j** par actif de l'univers (croisement CoinGecko markets ↔
+  paires Binance) pour lever le plafond de confiance d'horizon.
+- Corrélations réelles entre actifs (matrice sur les retours) pour la contribution au
+  risque portefeuille — aujourd'hui les caps sont des règles statiques prudentes.
 - Modèle ML supervisé en remplacement transparent de `opportunity_score`/`up_probability`.
-- Export **PDF**, envoi **email/Telegram/Discord**, page front avancée, tracking de
-  performance des recommandations.
+- Export **PDF**, envoi **email/Telegram/Discord**, tracking de performance des
+  recommandations.

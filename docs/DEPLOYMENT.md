@@ -137,8 +137,11 @@ Définies dans `.env` (à la racine) ou l'environnement. Source de vérité : `c
 | `DAILY_REPORT_API_BASE` | http://127.0.0.1:8000 | URL lue par le worker (tiers univers/macro) |
 | `DAILY_REPORT_HTTP_TIMEOUT` | 20.0 | Timeout HTTP des lectures du worker |
 | `DAILY_REPORT_PERSIST_DB` | True | Miroir best-effort de l'index + scores par actif en Postgres (fichiers = vérité) |
+| `ENABLE_TOP1000_WATCHLIST` | True | Watchlist externe top 1000 CoinGecko (best-effort, 1×/génération, jamais bloquant) |
+| `TOP1000_PAGES` | 4 | Pages de 250 lues sur `/coins/markets` (4 = top 1000) |
+| `TOP1000_MIN_VOLUME_USD` | 1000000 | Plancher de volume 24h pour qu'un coin hors univers soit une « nouvelle opportunité » |
 
-> Détail complet : [daily_crypto_report.md](daily_crypto_report.md). Real-data-only ; 1h/7j/30j + market cap = `N/A`.
+> Détail complet : [daily_crypto_report.md](daily_crypto_report.md). Real-data-only ; 1h/7j/30j + market cap univers = « Donnée indisponible » (raison affichée), market cap réelle via la watchlist externe CoinGecko.
 
 ### Feature flags / social / ops / métriques / logs
 | Variable | Défaut | Rôle |
